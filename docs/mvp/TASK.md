@@ -639,3 +639,17 @@ land on `.../{gateway}/compat/chat/completions` (`dynamic/runner`). Verified
 against the deployment: `/` and `/_server` redirect to Access, and
 `/oauth/client-metadata.json` is public (200). Model settings and the owner
 login remain manual steps.
+
+### 2026-10-14 — AI Gateway transport fix
+
+`AiBindingTransport` used `gateway.getUrl()` followed by a plain `fetch`, which
+is not authenticated; the `mi` gateway requires `cf-aig-authorization`, so model
+calls failed with 401. It now sends through the binding's universal-request API
+(`gateway.run({ provider, endpoint, headers, query })`), which applies gateway
+authentication. Dynamic routes (`dynamic/<route>`, for example `dynamic/runner`)
+are addressed through the unified provider: the transport detects a `dynamic/`
+model (the codecs hardcode their protocol provider) and rewrites the endpoint
+to `/compat/chat/completions`. Verified against gateway `mi` with the gateway
+token: `dynamic/runner` answers 200 with `cf-aig-model`/`cf-aig-provider`
+headers, and `stream: true` returns `text/event-stream`. Deployed as version
+`9e7a4ac1-70ee-4059-84c5-b382c8ef16e0`; unit suite 99 passing.

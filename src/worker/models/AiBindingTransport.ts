@@ -1,6 +1,8 @@
 // The only module that knows the AI binding's gateway API (PLAN.md -> Model
-// boundary). It resolves the provider-scoped gateway URL and performs the
-// provider-native request; tests replace it with `FakeGatewayTransport`.
+// boundary). It sends the provider-native request through the binding's
+// universal-request API so AI Gateway authentication is applied by the runtime;
+// a plain `fetch` to `getUrl()` is not authenticated. Tests replace it with
+// `FakeGatewayTransport`.
 
 import type { GatewayRequest, GatewayTransport } from "./types";
 
@@ -11,23 +13,25 @@ export class AiBindingTransport implements GatewayTransport {
 
   async send(request: GatewayRequest, signal: AbortSignal): Promise<Response> {
     const gateway = this.resolve().gateway(request.gatewayId);
-    const base = await gateway.getUrl(request.provider);
-    // The unified (OpenAI-compatible) endpoint is mounted at
-    // `/compat/chat/completions`, and AI Gateway dynamic routes
-    // (`dynamic/<route>`) are invoked through it. Codecs emit the
-    // provider-native `/v1/...` path, so drop that segment for this provider.
-    const path =
-      request.provider === "compat" ? request.path.replace(/^\/v1\//, "/") : request.path;
-    const url = `${base.replace(/\/+$/, "")}${path}`;
-    return fetch(url, {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        ...request.headers,
+    // AI Gateway dynamic routes (`dynamic/<route>`) are invoked through the
+    // unified (OpenAI-compatible) endpoint at `/compat/chat/completions`. The
+    // codec emits the provider-native `/v1/...` path, so drop that segment and
+    // address the unified provider for those requests.
+    const model = (request.body as { model?: unknown } | undefined)?.model;
+    const unified =
+      request.provider === "compat" ||
+      (typeof model === "string" && model.startsWith("dynamic/"));
+    const provider = unified ? "compat" : request.provider;
+    const endpoint = unified ? request.path.replace(/^\/v1\//, "/") : request.path;
+    return gateway.run(
+      {
+        provider,
+        endpoint,
+        headers: request.headers,
+        query: request.body,
       },
-      body: JSON.stringify(request.body),
-      signal,
-    });
+      { signal },
+    );
   }
 
   private resolve(): Ai {
