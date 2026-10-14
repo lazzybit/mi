@@ -626,3 +626,16 @@ the real socket and dropping one connection) and `authentication_required` (an
 expiring assertion closed on the next publish from a second device). Browser
 coverage is 38 passing cases (19 narrow + 19 wide); `npm run test:unit` is 97
 passing and `npm run test:workers` 12 passing.
+
+### 2026-10-14 — first deployment
+
+Deployed to `mi.nomonator.com` (Worker `mi`, version
+`fbd74942-ff36-47ad-a7ff-62376d61face`). `wrangler.jsonc` now carries the real
+target: the `mi.nomonator.com` custom domain, `ACCESS_ISSUER`
+`https://nomonator.cloudflareaccess.com`, and the application AUD. The unified
+AI Gateway endpoint is supported for dynamic routes: when the model profile's
+provider is `compat`, `AiBindingTransport` drops the `/v1` segment so requests
+land on `.../{gateway}/compat/chat/completions` (`dynamic/runner`). Verified
+against the deployment: `/` and `/_server` redirect to Access, and
+`/oauth/client-metadata.json` is public (200). Model settings and the owner
+login remain manual steps.
