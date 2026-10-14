@@ -1,0 +1,37 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "mi",
+  "main": "./src/worker/index.ts",
+  "compatibility_date": "2026-08-11",
+  "compatibility_flags": ["nodejs_compat"],
+  "assets": {
+    "directory": "./dist/client",
+    "binding": "ASSETS",
+    "not_found_handling": "single-page-application"
+  },
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "OWNER",
+        "class_name": "OwnerObject"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["OwnerObject"]
+    }
+  ],
+  "ai": {
+    "binding": "AI"
+  },
+  "observability": {
+    "enabled": true
+  },
+  "vars": {
+    "ACCESS_ISSUER": "https://example.cloudflareaccess.com",
+    "ACCESS_AUDIENCE": "mi",
+    "OAUTH_CLIENT_METADATA_URL": "https://mi.example.com/oauth/client-metadata.json"
+  }
+}
