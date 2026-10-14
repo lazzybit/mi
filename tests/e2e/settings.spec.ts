@@ -21,7 +21,7 @@ test("a connector is discovered, connected, and persisted", async ({ page, conte
   await page.getByRole("button", { name: "Connectors" }).click();
   const item = page.locator(".connector-item").filter({ hasText: "Fixture" });
   await expect(item.locator(".connector-state")).toHaveText("ready", { timeout: 60_000 });
-  await expect(item.locator(".connector-tools")).toHaveText("2 tools");
+  await expect(item.locator(".connector-tools")).toHaveText("3 tools");
 });
 
 test("a skill is created, versioned, and persisted", async ({ page, context }, testInfo) => {

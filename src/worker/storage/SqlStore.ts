@@ -200,7 +200,11 @@ export function buildSnapshot(tx: StoreTransaction, conversationId?: Conversatio
       const entries = tx.entries.listRecent(conversationId, 100);
       const activeRun = tx.runs.activeForConversation(conversationId);
       const activeAttempt = activeRun
-        ? tx.attempts.listForRun(activeRun.id).find((a) => a.state === "dispatched" || a.state === "prepared")
+        ? tx.attempts
+            .listForRun(activeRun.id)
+            .find(
+              (a) => a.state === "dispatched" || a.state === "prepared" || a.state === "unknown",
+            )
         : undefined;
       const queuedInputs = tx.submissions.listQueuedForConversation(conversationId);
       const steering = activeRun ? tx.submissions.listSteeringForRun(activeRun.id) : [];

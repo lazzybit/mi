@@ -13,7 +13,7 @@ import type {
 } from "../../shared/commands";
 import type { ResolveAttemptInput } from "../../shared/domain";
 import type { StoreTransaction } from "../storage/SqlStore";
-import { projectConversation, projectEntry, projectRun, projectSubmission } from "../storage/projections";
+import { projectAttempt, projectConversation, projectEntry, projectRun, projectSubmission } from "../storage/projections";
 import type { EntryRecord, RunCheckpoint, RunRecord } from "../storage/records";
 import type { ViewChange } from "../../shared/wire";
 
@@ -283,6 +283,8 @@ export class RunControlService {
       createdAt: now,
     });
 
+    const changes: ViewChange[] = [];
+
     if (input.action === "retry") {
       // A retry creates a new linked attempt; the original unknown outcome is
       // preserved and never rewritten into "not executed".
@@ -302,6 +304,8 @@ export class RunControlService {
       run.state = "queued";
       run.updatedAt = now;
       tx.runs.update(run);
+      changes.push({ kind: "attempt.update", conversationId: run.conversationId, value: projectAttempt(attempt) });
+      changes.push({ kind: "attempt.update", conversationId: run.conversationId, value: projectAttempt(retry) });
     } else if (input.action === "accept_observed_state") {
       attempt.state = "succeeded";
       attempt.updatedAt = now;
@@ -309,6 +313,7 @@ export class RunControlService {
       run.state = "queued";
       run.updatedAt = now;
       tx.runs.update(run);
+      changes.push({ kind: "attempt.update", conversationId: run.conversationId, value: projectAttempt(attempt) });
     } else {
       // abandon
       attempt.state = "failed";
@@ -317,14 +322,11 @@ export class RunControlService {
       run.state = "failed";
       run.updatedAt = now;
       tx.runs.update(run);
+      changes.push({ kind: "attempt.update", conversationId: run.conversationId, value: projectAttempt(attempt) });
     }
 
-    return {
-      value: undefined,
-      changes: [
-        { kind: "run.update", conversationId: run.conversationId, value: projectRun(run) },
-      ],
-    };
+    changes.push({ kind: "run.update", conversationId: run.conversationId, value: projectRun(run) });
+    return { value: undefined, changes };
   }
 
   selectConversationSkills(

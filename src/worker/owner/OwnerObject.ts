@@ -64,6 +64,9 @@ export class OwnerObject extends DurableObjectBase<Env> {
     if (url.pathname === "/health") {
       return Response.json({ ok: true, owner: this.ownerDigest() });
     }
+    if (url.pathname === "/__fixture/evict") {
+      return this.handleFixtureEvict();
+    }
     return new Response("not found", { status: 404 });
   }
 
@@ -118,6 +121,21 @@ export class OwnerObject extends DurableObjectBase<Env> {
       authExpiresAt ?? Number.POSITIVE_INFINITY,
     );
     return new Response(null, { status: 101, webSocket: client });
+  }
+
+  private handleFixtureEvict(): Response {
+    // Browser-acceptance only: force a new object generation while a tool call
+    // is dispatched so the recovery matrix can be exercised. Without the
+    // fixture configuration this route does not exist.
+    const fixture = (this.env as unknown as Record<string, unknown>).MI_FIXTURE_MODEL_URL;
+    if (typeof fixture !== "string" || fixture.length === 0) {
+      return new Response("not found", { status: 404 });
+    }
+    if (!this.getRuntime().hasDispatchedAttempt()) {
+      return new Response("no dispatched attempt", { status: 409 });
+    }
+    this.ctx.abort("fixture eviction");
+    return new Response(null, { status: 204 });
   }
 
   private async handleRpc(request: Request): Promise<Response> {

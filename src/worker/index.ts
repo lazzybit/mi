@@ -37,7 +37,11 @@ async function route(request: Request, env: Env): Promise<Response> {
     return clientMetadata(env);
   }
 
-  if (url.pathname === "/api/mcp/oauth/callback" || url.pathname === "/ws") {
+  if (
+    url.pathname === "/api/mcp/oauth/callback" ||
+    url.pathname === "/ws" ||
+    url.pathname === "/__fixture/evict"
+  ) {
     return ownerRoute(request, env);
   }
 

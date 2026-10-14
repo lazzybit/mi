@@ -226,6 +226,11 @@ export class OwnerRuntime {
     this.sync.resnapshot(key);
   }
 
+  /** True when a tool attempt has been dispatched but not settled. */
+  hasDispatchedAttempt(): boolean {
+    return this.store.read((tx) => tx.attempts.listByState(["dispatched"]).length > 0);
+  }
+
   async dispatch(method: string, args: unknown[]): Promise<unknown> {
     switch (method) {
       case "createConversation":

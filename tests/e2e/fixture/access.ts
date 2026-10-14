@@ -36,7 +36,13 @@ export async function signAccessToken(subject: string, ttlSeconds = 3600): Promi
 }
 
 /** Authenticates a browser context as the given fixture owner. */
-export async function login(context: BrowserContext, subject: string, origin = "http://127.0.0.1:3000"): Promise<void> {
-  const token = await signAccessToken(subject);
-  await context.addCookies([{ name: "CF_Authorization", value: token, url: origin }]);
+export async function login(
+  context: BrowserContext,
+  subject: string,
+  options: { origin?: string; ttlSeconds?: number } = {},
+): Promise<void> {
+  const token = await signAccessToken(subject, options.ttlSeconds ?? 3600);
+  await context.addCookies([
+    { name: "CF_Authorization", value: token, url: options.origin ?? "http://127.0.0.1:3000" },
+  ]);
 }

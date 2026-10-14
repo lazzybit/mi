@@ -51,7 +51,11 @@ export function applyChange(snapshot: OwnerSnapshot, change: ViewChange): OwnerS
       const terminal = ["completed", "cancelled", "failed"].includes(change.value.state);
       return {
         ...snapshot,
-        selectedConversation: { ...selected, activeRun: terminal ? undefined : change.value },
+        selectedConversation: {
+          ...selected,
+          activeRun: terminal ? undefined : change.value,
+          activeAttempt: terminal ? undefined : selected.activeAttempt,
+        },
       };
     }
     case "inbox.replace": {

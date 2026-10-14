@@ -77,10 +77,15 @@ function modelReply(messages, tools) {
   const hasToolResult = messages.some((message) => message.role === "tool");
   const slow = /\[\[slow:(\d+)\]\]/.exec(text);
   const wantsTool = text.includes("[[tool]]");
+  const wantsHang = text.includes("[[hang]]");
   const wantsError = text.includes("[[error]]");
 
   if (wantsError) return { kind: "error" };
   if (slow) return { kind: "slow", delayMs: Number(slow[1]), text: `Reply: ${text}` };
+  if (wantsHang && !hasToolResult && tools.length > 0) {
+    const tool = tools.find((entry) => entry.function?.name?.endsWith("__hang")) ?? tools[0];
+    return { kind: "tool", name: tool.function.name, arguments: {} };
+  }
   if (wantsTool && !hasToolResult && tools.length > 0) {
     // Prefer the fixture connector tool; application tools may be listed too.
     const tool = tools.find((entry) => entry.function?.name?.endsWith("__echo")) ?? tools[0];
@@ -181,6 +186,11 @@ const MCP_TOOLS = [
     description: "Always fails",
     inputSchema: { type: "object", properties: {} },
   },
+  {
+    name: "hang",
+    description: "Never responds",
+    inputSchema: { type: "object", properties: {} },
+  },
 ];
 
 const mcpServer = createServer((request, response) => {
@@ -234,6 +244,11 @@ const mcpServer = createServer((request, response) => {
     if (message.method === "tools/call") {
       const name = message.params?.name;
       const arguments_ = message.params?.arguments ?? {};
+      if (name === "hang") {
+        // Never answer: the recovery acceptance test evicts the object while
+        // this call is dispatched, so its remote outcome is unknown.
+        return;
+      }
       const result =
         name === "fail"
           ? { content: [{ type: "text", text: "fixture tool failed" }], isError: true }
