@@ -311,16 +311,17 @@ required. Covers Change 13 and the mobile/browser tests.
   `ModelSettingsForm`, `McpConnectionList`, `McpConnectionEditor`, `SkillList`,
   `SkillEditor`, `ConversationSkillPicker`; single-column narrow layouts with no
   hover-only actions. Completion: browser tests cover each surface at narrow
-  width. Automated: model profile, connector add/connect/persist, and skill
-  create/version/persist at narrow and wide widths. `ConversationSkillPicker`
-  remains unwired in the UI (recorded as an open item).
+  width. Automated: model profile, connector add/connect/persist, skill
+  create/version/persist, and per-conversation skill selection through the
+  wired `ConversationSkillPicker`, at narrow and wide widths.
 - [x] **M6-T05 Connection states and stale bundles.** `connecting`, `live`,
   `reconnecting`, `authentication_required`, `offline`, and the outbox behavior
   when generated function references change. Completion: pending commands
   survive a stale bundle and resend through the current reference. Automated:
   acknowledgement loss followed by a reload resends the pending command through
-  the current reference. The full connection-state matrix (`reconnecting`,
-  `authentication_required`, `offline`) is not yet asserted in the browser.
+  the current reference, and `offline` is set on network loss and clears on
+  recovery. `reconnecting` and `authentication_required` are not yet asserted in
+  the browser.
 - [x] **M6-T06 Reconnect and device switching e2e.** Submission acknowledgement
   loss, duplicate resend, reconnect without waiting for a model response, and a
   second device seeing the same server state. Completion: automated e2e passes.
@@ -586,10 +587,22 @@ emulation) and `wide` projects run all 14 cases.
   typecheck` passes.
 - `npm run test:unit`: 97 passing.
 - `npm run test:workers`: 12 passing.
-- `npm run test:e2e`: 28 passing (14 narrow + 14 wide) in ~1.7 minutes.
+- `npm run test:e2e`: 32 passing (16 narrow + 16 wide) in ~1.7 minutes.
 
-**Open items.** `ConversationSkillPicker` is still unwired in the UI. The
-`RecoveryPanel` unresolved-outcome path and the full connection-state matrix
-(`reconnecting`, `authentication_required`, `offline`) are not yet automated.
+**Open items.** The `RecoveryPanel` unresolved-outcome path and the
+`reconnecting`/`authentication_required` connection states are not yet automated.
 Owner-phone checks (software keyboard, screen lock, network changes) remain
 pending, as do the optional live smoke tests.
+
+### 2026-10-14 — conversation skill picker and offline status
+
+Closed the two product gaps the acceptance suite had recorded as open.
+Per-conversation skill selection is now end to end: the conversation snapshot
+carries `selectedSkillIds`, `selectConversationSkills` publishes a
+`conversation.skills` change, and `ConversationScreen` renders the previously
+unwired `ConversationSkillPicker`. `ConversationFeed` now reports the distinct
+`offline` state on network loss, reconnects when the browser comes back online,
+and ignores close events from replaced sockets. Browser coverage grew to 32
+passing cases (16 narrow + 16 wide) with `skills.spec.ts` and
+`connection.spec.ts`; `npm run test:unit` remains 97 passing and
+`npm run test:workers` 12 passing.
