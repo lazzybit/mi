@@ -67,9 +67,6 @@ export class OwnerObject extends DurableObjectBase<Env> {
     if (url.pathname === "/__fixture/evict") {
       return this.handleFixtureEvict();
     }
-    if (url.pathname === "/__fixture/attempts") {
-      return this.handleFixtureAttempts();
-    }
     return new Response("not found", { status: 404 });
   }
 
@@ -139,15 +136,6 @@ export class OwnerObject extends DurableObjectBase<Env> {
     }
     this.ctx.abort("fixture eviction");
     return new Response(null, { status: 204 });
-  }
-
-  private handleFixtureAttempts(): Response {
-    const fixture = (this.env as unknown as Record<string, unknown>).MI_FIXTURE_MODEL_URL;
-    if (typeof fixture !== "string" || fixture.length === 0) {
-      return new Response("not found", { status: 404 });
-    }
-    if (!this.runtime) return Response.json({ note: "no runtime" });
-    return Response.json(this.runtime.unsettledAttempts());
   }
 
   private async handleRpc(request: Request): Promise<Response> {

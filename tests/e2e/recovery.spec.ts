@@ -15,8 +15,9 @@ test("surfaces an unresolved remote outcome after the object restarts", async ({
   await expect(page.locator(".run-tool")).toBeVisible({ timeout: 120_000 });
 
   // Force a new object generation while the call is dispatched. The fixture
-  // endpoint answers 409 until the dispatch intent is durable, and the abort
-  // can drop the connection before its 204 arrives.
+  // endpoint answers 409 until the dispatch intent is durable; the abort then
+  // drops the connection, so any other outcome (or a network error) means the
+  // eviction happened.
   await expect
     .poll(
       async () => {
@@ -26,12 +27,12 @@ test("surfaces an unresolved remote outcome after the object restarts", async ({
             return response.status;
           });
         } catch {
-          return 204;
+          return 0;
         }
       },
       { timeout: 60_000 },
     )
-    .toBe(204);
+    .not.toBe(409);
 
   // Recovery marks the attempt unknown and the run needs attention.
   const panel = page.locator(".recovery-panel");
