@@ -7,10 +7,11 @@
 - 7201dad add conversation deletion contracts and durable outcomes
 - 2f76dba add conversation management controls and sync cleanup
 - 602c104 cover deletion, persistence, and management behavior
+- d4c72cc batch artifact and dependent deletes
 
 These are the implementation commits on `adr-0001`. They were pushed to
 `origin/adr-0001` before verification. The branch head verified below is
-602c104.
+d4c72cc.
 
 ## Result
 
@@ -76,11 +77,15 @@ Verification outcomes:
   118 tests); `npm run test:workers` passed (2 files, 14 tests).
   `npm run test:e2e` could not run: Playwright reports `Unsupported platform:
   android` and no browsers are installed.
-- Container (x86_64 Debian, same revision 602c104): `npm run typecheck`
-  passed; `npm run test:unit` passed (118 tests); `npm run test:workers`
-  passed (14 tests); `npm run test:e2e` passed (46 tests, including the new
-  inline rename, rename cancel, confirmed deletion, and second-device removal
-  cases).
+- Container (x86_64 Debian): at 602c104, `npm run typecheck` passed;
+  `npm run test:unit` passed (118 tests); `npm run test:workers` passed
+  (14 tests); `npm run test:e2e` passed (46 tests). At d4c72cc,
+  `npm run typecheck`, `npm run test:unit` (118 tests), and
+  `npm run test:workers` (14 tests) passed again, and
+  `npx playwright test tests/e2e/conversations.spec.ts` passed (14 tests)
+  covering inline rename, rename cancel, confirmed deletion, and second-device
+  removal. The d4c72cc change is limited to batching artifact and dependent
+  deletes within SQLite parameter limits.
 
 The PLAN Target is achieved for the authorized interim scope. Pre-existing
 artifacts without a verifiable ownership relationship may remain, as expressly
