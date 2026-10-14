@@ -34,6 +34,7 @@ export class ConversationFeed implements ConversationViewSource {
   private retry = 0;
   private reconnectTimer?: ReturnType<typeof setTimeout>;
   private readonly valueListeners = new Set<(snapshot: OwnerSnapshot) => void>();
+  private readonly snapshotListeners = new Set<(snapshot: OwnerSnapshot) => void>();
   private readonly statusListeners = new Set<(status: ConnectionStatus) => void>();
   private readonly pendingValues: ((snapshot: OwnerSnapshot) => void)[] = [];
 
@@ -65,7 +66,7 @@ export class ConversationFeed implements ConversationViewSource {
       this.setStatus("live");
       this.send({ type: "subscribe", conversationId: this.selection });
     });
-    socket.addEventListener("message", (event) => this.onMessage(event.data));
+    socket.addEventListener("message", (event) => this.onMessage(socket, event.data));
     socket.addEventListener("close", (event) => this.onClose(socket, event.code));
     socket.addEventListener("error", () => this.onClose(socket, undefined));
   }
@@ -95,6 +96,15 @@ export class ConversationFeed implements ConversationViewSource {
     return () => this.valueListeners.delete(listener);
   }
 
+  /**
+   * ADR-0001: fresh authoritative snapshots only. The app establishes its
+   * reconnect cleanup and outbox replay boundary here, not on reduced changes.
+   */
+  onSnapshot(listener: (snapshot: OwnerSnapshot) => void): () => void {
+    this.snapshotListeners.add(listener);
+    return () => this.snapshotListeners.delete(listener);
+  }
+
   onStatus(listener: (status: ConnectionStatus) => void): () => void {
     this.statusListeners.add(listener);
     listener(this.status);
@@ -109,7 +119,9 @@ export class ConversationFeed implements ConversationViewSource {
     }
   }
 
-  private onMessage(raw: unknown): void {
+  private onMessage(socket: WebSocket, raw: unknown): void {
+    // ADR-0001: ignore frames from a socket that has already been replaced.
+    if (this.socket !== socket) return;
     if (typeof raw !== "string") return;
     const frame = decodeServerFrame(raw);
     if (!frame) return;
@@ -117,6 +129,7 @@ export class ConversationFeed implements ConversationViewSource {
       this.streamId = frame.streamId;
       this.sequence = 0;
       this.emit(frame.value);
+      for (const listener of this.snapshotListeners) listener(frame.value);
       return;
     }
     // A gap in the stream sequence means frames were missed; request a fresh
@@ -126,7 +139,10 @@ export class ConversationFeed implements ConversationViewSource {
       return;
     }
     this.sequence = frame.sequence;
-    if (this.snapshot) this.emit(applyChanges(this.snapshot, frame.changes));
+    if (this.snapshot) {
+      const reduced = applyChanges(this.snapshot, frame.changes);
+      this.emit({ ...reduced, revision: frame.revision });
+    }
   }
 
   private onClose(socket: WebSocket, code?: number): void {

@@ -4,7 +4,7 @@ import type { SkillView } from "../../shared/domain";
 
 export function SkillEditor(props: {
   skill?: SkillView;
-  onSave: (payload: unknown, skillId?: string) => Promise<void>;
+  onSave: (payload: unknown, skillId?: string) => Promise<unknown>;
   onCancel: () => void;
 }): JSX.Element {
   const [name, setName] = createSignal(props.skill?.name ?? "");

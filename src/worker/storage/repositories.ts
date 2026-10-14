@@ -4,6 +4,7 @@
 import {
   all,
   boolToInt,
+  chunk,
   count,
   first,
   intToBool,
@@ -95,10 +96,11 @@ export class CommandReceiptRepository {
       payload_hash: string;
       result_json: string;
       revision: number;
+      outcome: string | null;
       created_at: number;
     }>(
       this.sql,
-      `SELECT command_id, kind, payload_hash, result_json, revision, created_at
+      `SELECT command_id, kind, payload_hash, result_json, revision, outcome, created_at
        FROM command_receipts WHERE command_id = ?`,
       commandId,
     );
@@ -109,6 +111,7 @@ export class CommandReceiptRepository {
       payloadHash: row.payload_hash,
       resultJson: row.result_json,
       revision: Number(row.revision),
+      outcome: row.outcome === "rejected" ? "rejected" : "accepted",
       createdAt: Number(row.created_at),
     };
   }
@@ -116,13 +119,14 @@ export class CommandReceiptRepository {
   insert(record: CommandReceiptRecord): void {
     run(
       this.sql,
-      `INSERT INTO command_receipts (command_id, kind, payload_hash, result_json, revision, created_at)
-       VALUES (?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO command_receipts (command_id, kind, payload_hash, result_json, revision, outcome, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
       record.commandId,
       record.kind,
       record.payloadHash,
       record.resultJson,
       record.revision,
+      record.outcome,
       record.createdAt,
     );
   }
@@ -252,6 +256,11 @@ export class ConversationRepository {
     );
   }
 
+  // ADR-0001: permanent removal of the conversation row.
+  delete(id: string): void {
+    run(this.sql, `DELETE FROM conversations WHERE id = ?`, id);
+  }
+
   touch(id: string, updatedAt: number): void {
     run(this.sql, `UPDATE conversations SET updated_at = ? WHERE id = ?`, updatedAt, id);
   }
@@ -370,6 +379,11 @@ export class SubmissionRepository {
       id,
     );
   }
+
+  // ADR-0001: conversation-owned submissions are removed with the conversation.
+  deleteForConversation(conversationId: string): void {
+    run(this.sql, `DELETE FROM submissions WHERE conversation_id = ?`, conversationId);
+  }
 }
 
 interface SubmissionRow {
@@ -476,6 +490,25 @@ export class RunRepository {
       at,
       id,
     );
+  }
+
+  listForConversation(conversationId: string): RunRecord[] {
+    return all<RunRow>(
+      this.sql,
+      `SELECT * FROM runs WHERE conversation_id = ? ORDER BY created_at ASC`,
+      conversationId,
+    ).map((row) => mapRun(row) as RunRecord);
+  }
+
+  listAll(): RunRecord[] {
+    return all<RunRow>(this.sql, `SELECT * FROM runs ORDER BY created_at ASC`).map(
+      (row) => mapRun(row) as RunRecord,
+    );
+  }
+
+  // ADR-0001: runs are removed after their dependent attempts.
+  deleteForConversation(conversationId: string): void {
+    run(this.sql, `DELETE FROM runs WHERE conversation_id = ?`, conversationId);
   }
 }
 
@@ -605,6 +638,25 @@ export class AttemptRepository {
   markState(id: string, state: string, updatedAt: number): void {
     run(this.sql, `UPDATE attempts SET state = ?, updated_at = ? WHERE id = ?`, state, updatedAt, id);
   }
+
+  listForConversation(conversationId: string): AttemptRecord[] {
+    return all<AttemptRow>(
+      this.sql,
+      `SELECT * FROM attempts WHERE conversation_id = ? ORDER BY created_at ASC`,
+      conversationId,
+    ).map((row) => mapAttempt(row) as AttemptRecord);
+  }
+
+  listAll(): AttemptRecord[] {
+    return all<AttemptRow>(this.sql, `SELECT * FROM attempts ORDER BY created_at ASC`).map(
+      (row) => mapAttempt(row) as AttemptRecord,
+    );
+  }
+
+  // ADR-0001: attempts are removed with their conversation.
+  deleteForConversation(conversationId: string): void {
+    run(this.sql, `DELETE FROM attempts WHERE conversation_id = ?`, conversationId);
+  }
 }
 
 interface AttemptRow {
@@ -731,6 +783,25 @@ export class EntryRepository {
   updateText(id: string, text: string): void {
     run(this.sql, `UPDATE entries SET text = ? WHERE id = ?`, text, id);
   }
+
+  listForConversation(conversationId: string): EntryRecord[] {
+    return all<EntryRow>(
+      this.sql,
+      `SELECT * FROM entries WHERE conversation_id = ? ORDER BY sequence ASC`,
+      conversationId,
+    ).map((row) => mapEntry(row) as EntryRecord);
+  }
+
+  listAll(): EntryRecord[] {
+    return all<EntryRow>(this.sql, `SELECT * FROM entries ORDER BY conversation_id ASC, sequence ASC`).map(
+      (row) => mapEntry(row) as EntryRecord,
+    );
+  }
+
+  // ADR-0001: transcript entries are removed with their conversation.
+  deleteForConversation(conversationId: string): void {
+    run(this.sql, `DELETE FROM entries WHERE conversation_id = ?`, conversationId);
+  }
 }
 
 interface EntryRow {
@@ -802,6 +873,14 @@ export class LiveOutputRepository {
 
   clear(attemptId: string): void {
     run(this.sql, `DELETE FROM live_output WHERE attempt_id = ?`, attemptId);
+  }
+
+  // ADR-0001: live output for the conversation's attempts is removed first.
+  deleteForAttempts(attemptIds: readonly string[]): void {
+    for (const batch of chunk(attemptIds, 500)) {
+      const placeholders = batch.map(() => "?").join(",");
+      run(this.sql, `DELETE FROM live_output WHERE attempt_id IN (${placeholders})`, ...batch);
+    }
   }
 }
 
@@ -885,6 +964,15 @@ export class ArtifactRepository {
       digest,
       artifactId,
     );
+  }
+
+  // ADR-0001: remove identifiable conversation-exclusive payloads and chunks.
+  deleteMany(ids: readonly string[]): void {
+    for (const batch of chunk(ids, 500)) {
+      const placeholders = batch.map(() => "?").join(",");
+      run(this.sql, `DELETE FROM artifact_chunks WHERE artifact_id IN (${placeholders})`, ...batch);
+      run(this.sql, `DELETE FROM artifacts WHERE id IN (${placeholders})`, ...batch);
+    }
   }
 }
 
@@ -1345,6 +1433,24 @@ export class SkillRepository {
     };
   }
 
+  listAllResources(): SkillResourceRecord[] {
+    return all<{
+      skill_id: string;
+      version: number;
+      path: string;
+      media_type: string;
+      artifact_id: string;
+    }>(this.sql, `SELECT * FROM skill_resources ORDER BY skill_id ASC, version ASC, path ASC`).map(
+      (row) => ({
+        skillId: row.skill_id,
+        version: Number(row.version),
+        path: row.path,
+        mediaType: row.media_type,
+        artifactId: row.artifact_id,
+      }),
+    );
+  }
+
   selectForConversation(conversationId: string, skillIds: readonly string[]): void {
     run(this.sql, `DELETE FROM conversation_skills WHERE conversation_id = ?`, conversationId);
     for (const skillId of skillIds) {
@@ -1464,6 +1570,11 @@ export class ContextSnapshotRepository {
       createdAt: Number(row.created_at),
     };
   }
+
+  // ADR-0001: context snapshots are conversation-owned and removed with it.
+  deleteForConversation(conversationId: string): void {
+    run(this.sql, `DELETE FROM context_snapshots WHERE conversation_id = ?`, conversationId);
+  }
 }
 
 interface ContextSnapshotRow {
@@ -1520,6 +1631,36 @@ export class AttemptResolutionRepository {
       createdAt: Number(row.created_at),
     }));
   }
+
+  listAll(): AttemptResolutionRecord[] {
+    return all<{
+      id: string;
+      attempt_id: string;
+      action: string;
+      explanation: string;
+      evidence_json: string;
+      created_at: number;
+    }>(this.sql, `SELECT * FROM attempt_resolutions ORDER BY created_at ASC`).map((row) => ({
+      id: row.id,
+      attemptId: row.attempt_id,
+      action: row.action,
+      explanation: row.explanation,
+      evidenceJson: row.evidence_json,
+      createdAt: Number(row.created_at),
+    }));
+  }
+
+  // ADR-0001: resolutions of the conversation's attempts are removed with it.
+  deleteForAttempts(attemptIds: readonly string[]): void {
+    for (const batch of chunk(attemptIds, 500)) {
+      const placeholders = batch.map(() => "?").join(",");
+      run(
+        this.sql,
+        `DELETE FROM attempt_resolutions WHERE attempt_id IN (${placeholders})`,
+        ...batch,
+      );
+    }
+  }
 }
 
 export type { SqlValue };
@@ -1564,6 +1705,13 @@ export class RepositoryInstructionRepository {
       this.sql,
       `SELECT * FROM repository_instructions WHERE workspace_root = ? ORDER BY path ASC`,
       workspaceRoot,
+    ).map((row) => mapRepositoryInstruction(row) as RepositoryInstructionRecord);
+  }
+
+  listAll(): RepositoryInstructionRecord[] {
+    return all<RepositoryInstructionRow>(
+      this.sql,
+      `SELECT * FROM repository_instructions ORDER BY workspace_root ASC, path ASC`,
     ).map((row) => mapRepositoryInstruction(row) as RepositoryInstructionRecord);
   }
 }

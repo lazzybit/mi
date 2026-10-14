@@ -28,11 +28,17 @@ export function applyChange(snapshot: OwnerSnapshot, change: ViewChange): OwnerS
             : selected,
       };
     }
-    case "conversation.remove":
+    case "conversation.remove": {
+      // ADR-0001: removing the selected conversation clears its snapshot so
+      // the existing empty screen is shown; other selections are preserved.
+      const selected = snapshot.selectedConversation;
       return {
         ...snapshot,
         conversations: snapshot.conversations.filter((c) => c.id !== change.conversationId),
+        selectedConversation:
+          selected && selected.conversation.id === change.conversationId ? undefined : selected,
       };
+    }
     case "entry.append":
     case "entry.update": {
       const selected = snapshot.selectedConversation;

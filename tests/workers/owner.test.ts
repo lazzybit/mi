@@ -66,6 +66,36 @@ describe("OwnerObject RPC", () => {
     expect(response.status).toBe(400);
   });
 
+
+  it("deletes a conversation and replays its receipt", async () => {
+    const stub = ownerStub("owner-g");
+    const created = (await rpc(stub, "createConversation", [
+      { commandId: "c1", payload: { title: "Gone" } },
+    ])).body.value as { result: { conversationId: string } };
+    const conversationId = created.result.conversationId;
+
+    const deleted = await rpc(stub, "deleteConversation", [
+      { commandId: "d1", payload: { conversationId } },
+    ]);
+    expect(deleted.status).toBe(200);
+    const replay = await rpc(stub, "deleteConversation", [
+      { commandId: "d1", payload: { conversationId } },
+    ]);
+    expect(replay.status).toBe(200);
+
+    const snapshot = (await rpc(stub, "snapshot", [])).body.value as { conversations: unknown[] };
+    expect(snapshot.conversations).toHaveLength(0);
+  });
+
+  it("returns NOT_FOUND when deleting an unknown conversation", async () => {
+    const stub = ownerStub("owner-i");
+    const missing = await rpc(stub, "deleteConversation", [
+      { commandId: "d1", payload: { conversationId: "missing" } },
+    ]);
+    expect(missing.status).toBe(404);
+    expect(missing.body.error?.code).toBe("NOT_FOUND");
+  });
+
   it("persists a submission across a fresh request to the same object", async () => {
     const stub = ownerStub("owner-f");
     const created = (await rpc(stub, "createConversation", [

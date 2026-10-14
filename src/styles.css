@@ -140,6 +140,75 @@ button {
   font-weight: 600;
 }
 
+.conversation-row {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  margin-bottom: 0.35rem;
+}
+
+.conversation-controls,
+.rename-actions,
+.delete-actions {
+  display: flex;
+  gap: 0.35rem;
+  flex-wrap: wrap;
+}
+
+.icon {
+  min-height: 2rem;
+  padding: 0.25rem 0.5rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--panel-2);
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+
+.rename-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  padding: 0.4rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel-2);
+}
+
+.rename-input {
+  width: 100%;
+  padding: 0.4rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--panel);
+  color: inherit;
+}
+
+.delete-confirm {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  padding: 0.5rem;
+  border: 1px solid var(--danger);
+  border-radius: 8px;
+  background: var(--panel-2);
+}
+
+.delete-confirm p {
+  margin: 0;
+}
+
+.hint {
+  font-size: 0.75rem;
+  color: var(--muted);
+}
+
+.inline-error {
+  margin: 0;
+  font-size: 0.75rem;
+  color: var(--danger);
+}
+
 .run-dot,
 .queued-badge,
 .connection,

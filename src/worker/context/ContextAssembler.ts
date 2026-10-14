@@ -2,7 +2,7 @@
 // a ready snapshot or a compaction request; it never makes an untracked model
 // call.
 
-import { AppError, type ArtifactId, type ContextSnapshotId } from "../../shared/domain";
+import { AppError, type ContextSnapshotId } from "../../shared/domain";
 import { hashPayload } from "../../shared/json";
 import type { ModelHistoryItem, ModelRequest, ModelToolDefinition } from "../models/types";
 import type { ToolDescriptor } from "../mcp/types";
@@ -20,7 +20,7 @@ export interface PromptSection {
 
 export type ContextPreparation =
   | { kind: "ready"; snapshotId: ContextSnapshotId }
-  | { kind: "compaction_required"; requestArtifactId: ArtifactId; plan: CompactionPlan };
+  | { kind: "compaction_required"; plan: CompactionPlan };
 
 export interface ContextAssemblerDeps {
   clock: Clock;
@@ -65,18 +65,10 @@ export class ContextAssembler {
     if (assessment.overBudget) {
       const plan = this.deps.compaction.plan(entries);
       if (plan) {
-        const artifactId = this.deps.ids.next("artifact");
-        tx.artifacts.create({
-          id: artifactId,
-          mimeType: "application/json",
-          encoding: "utf8",
-          byteCount: 0,
-          complete: false,
-          createdAt: this.deps.clock.now(),
-        });
-        tx.artifacts.appendChunk(artifactId, 0, JSON.stringify(plan), JSON.stringify(plan).length);
-        tx.artifacts.complete(artifactId, hashPayload(plan));
-        return { kind: "compaction_required", requestArtifactId: artifactId, plan };
+        // ADR-0001: no compaction-plan artifact is persisted; the driver does
+        // not consume its effect id and the actual compaction request is
+        // recorded through its attempt.
+        return { kind: "compaction_required", plan };
       }
     }
 

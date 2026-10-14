@@ -1,4 +1,4 @@
-import { Show, createSignal } from "solid-js";
+import { Show, createEffect, createSignal } from "solid-js";
 import type { JSX } from "@solidjs/web";
 import type { OwnerSnapshot, TranscriptEntryView } from "../../shared/domain";
 import type { ConnectionStatus } from "../sync/ConversationFeed";
@@ -21,6 +21,16 @@ export function ConversationScreen(props: {
 }): JSX.Element {
   const conversation = () => props.snapshot.selectedConversation;
   const [older, setOlder] = createSignal<TranscriptEntryView[]>([]);
+  // ADR-0001: selection-scoped state is discarded when the selection changes,
+  // including when the same conversation is selected again.
+  const [selectionGeneration, setSelectionGeneration] = createSignal(0);
+  createEffect(
+    () => conversation()?.conversation.id,
+    () => {
+      setOlder([]);
+      setSelectionGeneration((generation) => generation + 1);
+    },
+  );
 
   const entries = () => [...older(), ...(conversation()?.entries ?? [])];
   // Pagination advances from the oldest entry already loaded rather than
@@ -31,7 +41,10 @@ export function ConversationScreen(props: {
   const loadOlder = async () => {
     const before = oldestSequence();
     if (!before || before <= 1) return;
+    const generation = selectionGeneration();
     const page = await props.onHistory(before);
+    // Discard a late page that belongs to a replaced selection.
+    if (generation !== selectionGeneration()) return;
     setOlder((previous) => [...page, ...previous]);
   };
 
@@ -83,6 +96,7 @@ export function ConversationScreen(props: {
             <Transcript
               entries={entries()}
               hasOlder={hasOlder()}
+              generation={selectionGeneration()}
               onLoadOlder={() => void loadOlder()}
               onReadArtifact={props.onReadArtifact}
             />

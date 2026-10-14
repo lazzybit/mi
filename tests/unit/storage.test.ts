@@ -13,7 +13,7 @@ describe("SqlStore", () => {
   it("migrates from empty storage and records the schema version", () => {
     const { store } = newStore();
     const revision = store.read((tx) => tx.ownerState.read());
-    expect(revision.schemaVersion).toBe(1);
+    expect(revision.schemaVersion).toBe(2);
     expect(revision.revision).toBe(0);
   });
 
@@ -87,6 +87,30 @@ describe("SqlStore", () => {
     expect(chunks.map((c) => c.data).join("")).toBe("hello world");
   });
 
+  it("migrates a populated version-1 receipt table and is repeatable", () => {
+    const backend = new NodeSqlBackend();
+    backend.sql.exec(
+      `CREATE TABLE command_receipts (
+         command_id TEXT PRIMARY KEY,
+         kind TEXT NOT NULL,
+         payload_hash TEXT NOT NULL,
+         result_json TEXT NOT NULL,
+         revision INTEGER NOT NULL,
+         created_at INTEGER NOT NULL
+       )`,
+    );
+    backend.sql.exec(
+      `INSERT INTO command_receipts (command_id, kind, payload_hash, result_json, revision, created_at)
+       VALUES ('cmd-legacy', 'conversation.create', 'hash', '{}', 1, 1000)`,
+    );
+    const store = new SqlStore(backend);
+    store.migrate();
+    expect(store.read((tx) => tx.commands.find("cmd-legacy"))?.outcome).toBe("accepted");
+    // A repeated migration is a no-op and preserves the row.
+    store.migrate();
+    expect(store.read((tx) => tx.commands.find("cmd-legacy"))?.outcome).toBe("accepted");
+  });
+
   it("enforces command receipt idempotency at the storage level", () => {
     const { store } = newStore();
     store.transaction((tx) =>
@@ -96,6 +120,7 @@ describe("SqlStore", () => {
         payloadHash: "hash-a",
         resultJson: JSON.stringify({ conversationId: "c1" }),
         revision: 1,
+        outcome: "accepted",
         createdAt: 1000,
       }),
     );
@@ -110,6 +135,7 @@ describe("SqlStore", () => {
           payloadHash: "hash-b",
           resultJson: "{}",
           revision: 2,
+          outcome: "accepted",
           createdAt: 1001,
         }),
       ),

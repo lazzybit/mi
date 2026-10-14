@@ -4,7 +4,7 @@ import type { ModelProfileView } from "../../shared/domain";
 
 export function ModelSettingsForm(props: {
   model?: ModelProfileView;
-  dispatch: (kind: string, payload: unknown) => Promise<void>;
+  dispatch: (kind: string, payload: unknown) => Promise<unknown>;
 }): JSX.Element {
   const [gatewayId, setGatewayId] = createSignal(props.model?.gatewayId ?? "default");
   const [provider, setProvider] = createSignal(props.model?.provider ?? "openai");

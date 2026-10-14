@@ -5,7 +5,7 @@ import { ConversationList } from "./client/components/ConversationList";
 import { ConversationScreen } from "./client/components/ConversationScreen";
 import { SettingsScreen } from "./client/components/SettingsScreen";
 import type { AppActions, AppView } from "./client/components/types";
-import { CommandDispatcher } from "./client/commands/CommandDispatcher";
+import { CommandDispatcher, type DispatchResult } from "./client/commands/CommandDispatcher";
 import { CommandOutbox } from "./client/commands/CommandOutbox";
 import { createCommandHandlers } from "./client/commands/registry";
 import { DraftStore } from "./client/storage/DraftStore";
@@ -26,10 +26,19 @@ export default function App() {
   const [view, setView] = createSignal<AppView>("chat");
   const [draft, setDraft] = createSignal("");
 
+  // ADR-0001: a fresh snapshot establishes the reconnect boundary. Commands
+  // wait for local reconciliation and ordered outbox replay before they are
+  // sent, so no mutation bypasses the authoritative state.
+  let releaseBoundary: () => void = () => {};
+  let boundary = new Promise<void>((resolve) => {
+    releaseBoundary = resolve;
+  });
+
   const actions: AppActions = {
-    async dispatch(kind, payload) {
+    async dispatch(kind, payload): Promise<DispatchResult> {
       const command = dispatcher.newCommand(kind, payload);
-      await dispatcher.dispatch(command);
+      await boundary;
+      return dispatcher.dispatch(command);
     },
     selectConversation(id) {
       setSelectedId(id);
@@ -40,15 +49,44 @@ export default function App() {
     reconnect: () => feed.reconnect(),
   };
 
+  const reconcile = async (value: OwnerSnapshot): Promise<void> => {
+    const known = new Set(value.conversations.map((conversation) => conversation.id));
+    for (const entry of drafts.list()) {
+      if (!known.has(entry.conversationId)) drafts.clear(entry.conversationId);
+    }
+    // Drop obsolete scoped mutations only when their target deletion is
+    // established. Pending creates, unacknowledged deletes, and legacy
+    // commands without a target are preserved for the server to settle.
+    for (const command of await outbox.pending()) {
+      if (command.kind === "conversation.create" || command.kind === "conversation.delete") continue;
+      const target = command.target?.conversationId;
+      if (!target) continue;
+      if (!known.has(target)) await outbox.acknowledge(command.commandId);
+    }
+    const selected = selectedId();
+    if (selected && !known.has(selected)) {
+      setSelectedId(undefined);
+      feed.select(undefined);
+      setDraft("");
+    }
+  };
+
   onSettled(() => {
-    void outbox.open().then(() => dispatcher.flush());
+    const opened = outbox.open();
     feed.subscribe((value) => {
       setSnapshot(value);
       const selected = value.selectedConversation?.conversation.id;
       if (selected && selected !== selectedId()) setSelectedId(selected);
     });
+    feed.onSnapshot((value) => {
+      boundary = boundary.then(async () => {
+        await reconcile(value);
+        await dispatcher.flush();
+      });
+      releaseBoundary();
+    });
     feed.onStatus(setStatus);
-    feed.connect();
+    void opened.then(() => feed.connect());
     return () => feed.dispose();
   });
 
@@ -82,6 +120,8 @@ export default function App() {
                 selectedId={selectedId()}
                 onSelect={(id) => actions.selectConversation(id)}
                 onCreate={() => void actions.dispatch("conversation.create", {})}
+                onRename={(id, title) => actions.dispatch("conversation.rename", { conversationId: id, title })}
+                onDelete={(id) => actions.dispatch("conversation.delete", { conversationId: id })}
               />
               <ConversationScreen
                 snapshot={value()}

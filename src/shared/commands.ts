@@ -22,6 +22,11 @@ export interface RenameConversationInput {
   title: string;
 }
 
+// ADR-0001: permanent conversation deletion uses the existing command path.
+export interface DeleteConversationInput {
+  conversationId: ConversationId;
+}
+
 export interface WithdrawSubmissionInput {
   submissionId: SubmissionId;
 }
@@ -97,6 +102,7 @@ export interface ResolveAttemptCommandInput extends ResolveAttemptInput {}
 export type CommandKind =
   | "conversation.create"
   | "conversation.rename"
+  | "conversation.delete"
   | "submission.submit"
   | "submission.withdraw"
   | "run.cancel"

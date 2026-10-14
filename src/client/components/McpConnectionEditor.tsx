@@ -4,7 +4,7 @@ import type { ConnectorAuthMode, ConnectorView } from "../../shared/domain";
 
 export function McpConnectionEditor(props: {
   connector?: ConnectorView;
-  onSave: (payload: unknown) => Promise<void>;
+  onSave: (payload: unknown) => Promise<unknown>;
   onCancel: () => void;
 }): JSX.Element {
   const [name, setName] = createSignal(props.connector?.name ?? "");

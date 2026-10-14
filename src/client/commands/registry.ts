@@ -3,8 +3,15 @@
 // function references while an old bundle keeps an outbox entry; the entry is
 // resent through the current reference for the same logical kind.
 
-import { cancelRun, resolveAttempt, resumeRun, submitInput, withdrawSubmission } from "../../rpc/runs";
-import { createConversation, renameConversation } from "../../rpc/conversations";
+import { appErrorFromApi, type CommandFunctionOutcome, type CommandReceipt } from "../../shared/domain";
+import {
+  cancelRun,
+  resolveAttempt,
+  resumeRun,
+  submitInput,
+  withdrawSubmission,
+} from "../../rpc/runs";
+import { createConversation, deleteConversation, renameConversation } from "../../rpc/conversations";
 import { saveModelProfile } from "../../rpc/settings";
 import { connectConnector, saveConnector, setConnectorEnabled } from "../../rpc/connectors";
 import {
@@ -16,10 +23,19 @@ import {
 } from "../../rpc/skills";
 import type { CommandHandler } from "./CommandDispatcher";
 
+// ADR-0001: management server functions reply with an explicit outcome. The
+// adapter reconstructs the browser-local AppError so the dispatcher can tell a
+// definitive rejection from a transport failure.
+function unwrap<T>(outcome: CommandFunctionOutcome<T>): CommandReceipt<T> {
+  if (outcome.ok) return outcome.receipt;
+  throw appErrorFromApi(outcome.error);
+}
+
 export function createCommandHandlers(): Record<string, CommandHandler> {
   return {
     "conversation.create": (command) => createConversation(command as never),
-    "conversation.rename": (command) => renameConversation(command as never),
+    "conversation.rename": async (command) => unwrap(await renameConversation(command as never)),
+    "conversation.delete": async (command) => unwrap(await deleteConversation(command as never)),
     "submission.submit": (command) => submitInput(command as never),
     "submission.withdraw": (command) => withdrawSubmission(command as never),
     "run.cancel": (command) => cancelRun(command as never),

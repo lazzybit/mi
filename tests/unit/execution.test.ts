@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { AppError } from "../../src/shared/domain";
 import type { ModelEvent, ModelGateway, ModelRequest } from "../../src/worker/models/types";
+import { OutputCommitter } from "../../src/worker/runtime/OutputCommitter";
 import {
   FakeModelGateway,
   bootstrapConversation,
@@ -191,6 +192,83 @@ describe("unsafe tool interruption", () => {
     expect(calls).toBeGreaterThanOrEqual(2);
     const snapshot = runtime.store.readSnapshot(conversationId);
     expect(snapshot.selectedConversation?.entries.some((e) => e.kind === "tool_result")).toBe(true);
+  });
+});
+
+describe("execution persistence boundaries", () => {
+  it("links every execution artifact to its attempt", async () => {
+    const { runtime, model, backend } = createTestRuntime();
+    const { conversationId } = await bootstrapConversation(runtime);
+    model.pushText("done");
+    await runtime.dispatch("submit", [envelope({ conversationId, text: "go", mode: "queue" })]);
+    await runtime.alarm();
+    const unlinked = backend.db
+      .prepare(
+        `SELECT COUNT(*) AS n FROM artifacts a WHERE NOT EXISTS (
+           SELECT 1 FROM attempts t
+           WHERE t.request_artifact_id = a.id OR t.result_artifact_id = a.id)`,
+      )
+      .get() as { n: number };
+    expect(Number(unlinked.n)).toBe(0);
+  });
+
+  it("discards late writes after the run disappears", async () => {
+    const { runtime, model, tools, backend } = createTestRuntime();
+    const { conversationId } = await bootstrapConversation(runtime);
+    tools.register("mutate", {
+      remoteName: "bash",
+      role: "container",
+      replayPolicy: "safe",
+      handler: () => {
+        // Simulate deletion while the tool is executing.
+        runtime.store.transaction((tx) => {
+          tx.runs.deleteForConversation(conversationId);
+          tx.attempts.deleteForConversation(conversationId);
+        });
+        return { isError: false, content: [{ type: "text", text: "ok" }] };
+      },
+    });
+    model.pushText("running", [{ toolCallId: "call_1", name: "mutate", arguments: {} }]);
+    await runtime.dispatch("submit", [envelope({ conversationId, text: "go", mode: "queue" })]);
+    await runtime.alarm();
+
+    const results = backend.db
+      .prepare(
+        `SELECT COUNT(*) AS n FROM entries WHERE conversation_id = ? AND kind = 'tool_result'`,
+      )
+      .get(conversationId) as { n: number };
+    expect(Number(results.n)).toBe(0);
+  });
+
+  it("completes cancellation for a paused run", async () => {
+    const { runtime } = createTestRuntime();
+    const { conversationId } = await bootstrapConversation(runtime);
+    runtime.store.transaction((tx) => {
+      tx.runs.insert({
+        id: "r1",
+        conversationId,
+        state: "waiting_for_auth",
+        phase: "prepare_context",
+        checkpoint: { phase: "prepare_context", turnNumber: 1, pendingToolCalls: [], nextToolIndex: 0 },
+        generation: tx.ownerState.readDriverGeneration(),
+        cancelRequestedAt: 5,
+        createdAt: 1,
+        updatedAt: 1,
+      });
+    });
+    await runtime.alarm();
+    expect(runtime.store.read((tx) => tx.runs.get("r1"))?.state).toBe("cancelled");
+  });
+
+  it("discards buffered output for an attempt that no longer exists", () => {
+    const { runtime, backend } = createTestRuntime();
+    const committer = new OutputCommitter(runtime.store, { now: () => 1 });
+    committer.append("ghost", "text");
+    expect(committer.flush("ghost")).toBe("");
+    const row = backend.db
+      .prepare(`SELECT COUNT(*) AS n FROM live_output WHERE attempt_id = 'ghost'`)
+      .get() as { n: number };
+    expect(Number(row.n)).toBe(0);
   });
 });
 

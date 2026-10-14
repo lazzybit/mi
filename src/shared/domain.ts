@@ -35,6 +35,15 @@ export interface CommandReceipt<T> {
   result: T;
 }
 
+/**
+ * ADR-0001: explicit serializable reply for management server functions. The
+ * Solid server-function boundary may not preserve thrown `AppError`
+ * instances, so the adapter reconstructs one on the client.
+ */
+export type CommandFunctionOutcome<T> =
+  | { ok: true; receipt: CommandReceipt<T> }
+  | { ok: false; error: ApiError };
+
 export type RunState =
   | "queued"
   | "running"
@@ -113,6 +122,14 @@ export class AppError extends Error {
   toApiError(): ApiError {
     return { code: this.code, message: this.message, retryable: this.retryable };
   }
+}
+
+/**
+ * ADR-0001: reconstruct a browser-local `AppError` from a serialized
+ * application error that crossed a server-function boundary.
+ */
+export function appErrorFromApi(api: ApiError): AppError {
+  return new AppError(api.code, api.message, api.retryable);
 }
 
 // ---------------------------------------------------------------------------

@@ -12,7 +12,8 @@ export class DraftStore {
 
   set(conversationId: string, value: string): void {
     if (typeof localStorage === "undefined") {
-      this.memory.set(conversationId, value);
+      if (value) this.memory.set(conversationId, value);
+      else this.memory.delete(conversationId);
       return;
     }
     try {
@@ -25,5 +26,28 @@ export class DraftStore {
 
   clear(conversationId: string): void {
     this.set(conversationId, "");
+  }
+
+  /** Enumerate stored drafts so reconnect cleanup can discard deleted ones. */
+  list(): { conversationId: string; value: string }[] {
+    if (typeof localStorage === "undefined") {
+      return [...this.memory].map(([conversationId, value]) => ({ conversationId, value }));
+    }
+    const drafts: { conversationId: string; value: string }[] = [];
+    try {
+      for (let index = 0; index < localStorage.length; index += 1) {
+        const key = localStorage.key(index);
+        if (!key || !key.startsWith(KEY_PREFIX)) continue;
+        const item = localStorage.getItem(key) ?? "";
+        if (!item) continue;
+        drafts.push({
+          conversationId: key.slice(KEY_PREFIX.length),
+          value: item,
+        });
+      }
+    } catch {
+      return [...this.memory].map(([conversationId, value]) => ({ conversationId, value }));
+    }
+    return drafts;
   }
 }

@@ -1,10 +1,19 @@
 // Maps stable application command kinds to statically imported server
 // functions and resends the same logical command after acknowledgement loss or
 // a stale-bundle failure (PLAN.md -> Client -> CommandDispatcher).
+//
+// ADR-0001: a definitive deletion rejection leaves the outbox so an
+// unavailable destructive action cannot run later. Transport uncertainty
+// keeps the same logical command and command id for retry.
 
 import { AppError, type CommandEnvelope, type CommandReceipt } from "../../shared/domain";
 import { stripUndefined } from "../../shared/json";
-import { CommandOutbox, OUTBOX_SCHEMA_VERSION, type PendingCommand } from "./CommandOutbox";
+import {
+  CommandOutbox,
+  OUTBOX_SCHEMA_VERSION,
+  type PendingCommand,
+  type PendingCommandTarget,
+} from "./CommandOutbox";
 
 export type CommandHandler = (command: CommandEnvelope<unknown>) => Promise<CommandReceipt<unknown>>;
 
@@ -20,8 +29,8 @@ export class CommandDispatcher {
     private readonly handlers: Record<string, CommandHandler>,
   ) {}
 
-  newCommand(kind: string, payload: unknown): PendingCommand {
-    return {
+  newCommand(kind: string, payload: unknown, target?: PendingCommandTarget): PendingCommand {
+    const command: PendingCommand = {
       commandId: crypto.randomUUID(),
       kind,
       payload: stripUndefined(payload),
@@ -29,6 +38,9 @@ export class CommandDispatcher {
       createdAt: Date.now(),
       state: "local_pending",
     };
+    const resolved = target ?? inferTarget(payload);
+    if (resolved) command.target = resolved;
+    return command;
   }
 
   async dispatch(command: PendingCommand): Promise<DispatchResult> {
@@ -46,9 +58,7 @@ export class CommandDispatcher {
       // Surface transport and serialization failures that would otherwise be
       // swallowed; application rejections are handled below.
       if (!appError) console.warn("mi: command transport failure", command.kind, error);
-      // Definitive application rejections are terminal; transport failures and
-      // stale-bundle reference errors keep the command pending for resend.
-      if (appError && appError.code !== "UNAUTHENTICATED" && appError.code !== "CONFLICT") {
+      if (appError && this.isDefinitive(command.kind, appError)) {
         await this.outbox.reject(command.commandId);
         return { status: "rejected", error: appError };
       }
@@ -64,6 +74,24 @@ export class CommandDispatcher {
     }
     return results;
   }
+
+  private isDefinitive(kind: string, error: AppError): boolean {
+    if (error.code === "UNAUTHENTICATED") return false;
+    // ADR-0001: any non-retryable deletion refusal is terminal.
+    if (kind === "conversation.delete") return !error.retryable || error.code === "NOT_FOUND";
+    return error.code !== "CONFLICT";
+  }
+}
+
+function inferTarget(payload: unknown): PendingCommandTarget | undefined {
+  if (typeof payload !== "object" || payload === null) return undefined;
+  const record = payload as Record<string, unknown>;
+  const target: PendingCommandTarget = {};
+  if (typeof record.conversationId === "string") target.conversationId = record.conversationId;
+  if (typeof record.runId === "string") target.runId = record.runId;
+  if (typeof record.submissionId === "string") target.submissionId = record.submissionId;
+  if (typeof record.attemptId === "string") target.attemptId = record.attemptId;
+  return Object.keys(target).length > 0 ? target : undefined;
 }
 
 function toAppError(error: unknown): AppError | undefined {

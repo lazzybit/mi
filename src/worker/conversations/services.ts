@@ -2,9 +2,10 @@
 // (PLAN.md -> Domain services). Services mutate through a `StoreTransaction`
 // and never perform network I/O.
 
-import { AppError, type CommandEnvelope, type ConversationId, type RunId, type SubmissionId } from "../../shared/domain";
+import { AppError, isTerminalRunState, type CommandEnvelope, type ConversationId, type RunId, type SubmissionId } from "../../shared/domain";
 import type {
   CreateConversationInput,
+  DeleteConversationInput,
   RenameConversationInput,
   SelectConversationSkillsInput,
   SkillIdInput,
@@ -14,6 +15,8 @@ import type {
 import type { ResolveAttemptInput } from "../../shared/domain";
 import type { StoreTransaction } from "../storage/SqlStore";
 import { projectAttempt, projectConversation, projectEntry, projectRun, projectSubmission } from "../storage/projections";
+import { projectConversationSummary, conversationSummaryChange } from "../storage/ConversationProjection";
+import { collectArtifactCandidates, collectSurvivingReferences } from "../storage/ArtifactReferences";
 import type { EntryRecord, RunCheckpoint, RunRecord } from "../storage/records";
 import type { ViewChange } from "../../shared/wire";
 
@@ -25,6 +28,17 @@ export interface ServiceDeps {
 export interface ServiceOutcome<T> {
   value: T;
   changes: ViewChange[];
+}
+
+/**
+ * ADR-0001: internal deletion result. The affected runtime ids let the owner
+ * discard in-flight execution state without exposing an inventory in the
+ * public command receipt.
+ */
+export interface ConversationDeletion {
+  conversationId: ConversationId;
+  runIds: RunId[];
+  attemptIds: string[];
 }
 
 function emptyCheckpoint(): RunCheckpoint {
@@ -51,7 +65,7 @@ export class ConversationService {
     return {
       value: { conversationId: id },
       changes: conversation
-        ? [{ kind: "conversation.upsert", value: { ...projectConversation(conversation), queuedCount: 0 } }]
+        ? [{ kind: "conversation.upsert", value: projectConversationSummary(tx, conversation) }]
         : [],
     };
   }
@@ -70,16 +84,58 @@ export class ConversationService {
     return {
       value: undefined,
       changes: updated
-        ? [
-            {
-              kind: "conversation.upsert",
-              value: {
-                ...projectConversation(updated),
-                queuedCount: tx.submissions.listQueuedForConversation(input.conversationId).length,
-              },
-            },
-          ]
+        ? [{ kind: "conversation.upsert", value: projectConversationSummary(tx, updated) }]
         : [],
+    };
+  }
+
+  /**
+   * ADR-0001: permanently remove a conversation. Eligibility is checked in the
+   * same transaction that performs the removal. Any non-terminal run refuses
+   * deletion with a definitive, non-retryable CONFLICT.
+   */
+  delete(
+    tx: StoreTransaction,
+    input: DeleteConversationInput,
+  ): ServiceOutcome<ConversationDeletion> {
+    const conversation = tx.conversations.get(input.conversationId);
+    if (!conversation) throw new AppError("NOT_FOUND", "conversation not found", false);
+
+    const runs = tx.runs.listForConversation(input.conversationId);
+    if (runs.some((run) => !isTerminalRunState(run.state))) {
+      throw new AppError(
+        "CONFLICT",
+        "conversation has queued or active work; finish or cancel it first",
+        false,
+      );
+    }
+
+    const attempts = tx.attempts.listForConversation(input.conversationId);
+    const attemptIds = attempts.map((attempt) => attempt.id);
+
+    // Evaluate surviving references before any row is removed.
+    const candidates = collectArtifactCandidates(tx, input.conversationId);
+    const surviving = collectSurvivingReferences(tx, input.conversationId);
+    const removable = [...candidates].filter((id) => !surviving.has(id));
+
+    tx.liveOutput.deleteForAttempts(attemptIds);
+    tx.attemptResolutions.deleteForAttempts(attemptIds);
+    tx.entries.deleteForConversation(input.conversationId);
+    tx.submissions.deleteForConversation(input.conversationId);
+    tx.contextSnapshots.deleteForConversation(input.conversationId);
+    tx.skills.selectForConversation(input.conversationId, []);
+    tx.attempts.deleteForConversation(input.conversationId);
+    tx.runs.deleteForConversation(input.conversationId);
+    tx.artifacts.deleteMany(removable);
+    tx.conversations.delete(input.conversationId);
+
+    return {
+      value: {
+        conversationId: input.conversationId,
+        runIds: runs.map((run) => run.id),
+        attemptIds,
+      },
+      changes: [{ kind: "conversation.remove", conversationId: input.conversationId }],
     };
   }
 }
@@ -119,16 +175,19 @@ export class SubmissionService {
       tx.conversations.touch(input.conversationId, now);
       const userEntry = this.appendUserEntry(tx, input.conversationId, text, now);
       const steering = tx.submissions.listSteeringForRun(activeRun.id);
+      const changes: ViewChange[] = [
+        { kind: "entry.append", conversationId: input.conversationId, value: projectEntry(userEntry) },
+        {
+          kind: "inbox.replace",
+          conversationId: input.conversationId,
+          values: steering.map(projectSubmission),
+        },
+      ];
+      const summary = conversationSummaryChange(tx, input.conversationId);
+      if (summary) changes.push(summary);
       return {
         value: { submissionId: id, runId: activeRun.id, state: "joined" },
-        changes: [
-          { kind: "entry.append", conversationId: input.conversationId, value: projectEntry(userEntry) },
-          {
-            kind: "inbox.replace",
-            conversationId: input.conversationId,
-            values: steering.map(projectSubmission),
-          },
-        ],
+        changes,
       };
     }
 
@@ -161,17 +220,20 @@ export class SubmissionService {
     tx.conversations.touch(input.conversationId, now);
     const userEntry = this.appendUserEntry(tx, input.conversationId, text, now);
     const queued = tx.submissions.listQueuedForConversation(input.conversationId);
+    const changes: ViewChange[] = [
+      { kind: "run.update", conversationId: input.conversationId, value: projectRun(run) },
+      { kind: "entry.append", conversationId: input.conversationId, value: projectEntry(userEntry) },
+      {
+        kind: "inbox.replace",
+        conversationId: input.conversationId,
+        values: queued.map(projectSubmission),
+      },
+    ];
+    const summary = conversationSummaryChange(tx, input.conversationId);
+    if (summary) changes.push(summary);
     return {
       value: { submissionId, runId, state: "queued" },
-      changes: [
-        { kind: "run.update", conversationId: input.conversationId, value: projectRun(run) },
-        { kind: "entry.append", conversationId: input.conversationId, value: projectEntry(userEntry) },
-        {
-          kind: "inbox.replace",
-          conversationId: input.conversationId,
-          values: queued.map(projectSubmission),
-        },
-      ],
+      changes,
     };
   }
 
@@ -205,16 +267,16 @@ export class SubmissionService {
       ...tx.submissions.listQueuedForConversation(submission.conversationId),
       ...(submission.runId ? tx.submissions.listSteeringForRun(submission.runId) : []),
     ];
-    return {
-      value: undefined,
-      changes: [
-        {
-          kind: "inbox.replace",
-          conversationId: submission.conversationId,
-          values: remaining.map(projectSubmission),
-        },
-      ],
-    };
+    const changes: ViewChange[] = [
+      {
+        kind: "inbox.replace",
+        conversationId: submission.conversationId,
+        values: remaining.map(projectSubmission),
+      },
+    ];
+    const summary = conversationSummaryChange(tx, submission.conversationId);
+    if (summary) changes.push(summary);
+    return { value: undefined, changes };
   }
 }
 
@@ -239,12 +301,12 @@ export class RunControlService {
     } else {
       throw new AppError("CONFLICT", `run is already ${run.state}`);
     }
-    return {
-      value: undefined,
-      changes: [
-        { kind: "run.update", conversationId: run.conversationId, value: projectRun(run) },
-      ],
-    };
+    const changes: ViewChange[] = [
+      { kind: "run.update", conversationId: run.conversationId, value: projectRun(run) },
+    ];
+    const summary = conversationSummaryChange(tx, run.conversationId);
+    if (summary) changes.push(summary);
+    return { value: undefined, changes };
   }
 
   resume(tx: StoreTransaction, runId: RunId): ServiceOutcome<void> {
@@ -256,12 +318,12 @@ export class RunControlService {
     run.state = "queued";
     run.updatedAt = this.deps.now();
     tx.runs.update(run);
-    return {
-      value: undefined,
-      changes: [
-        { kind: "run.update", conversationId: run.conversationId, value: projectRun(run) },
-      ],
-    };
+    const changes: ViewChange[] = [
+      { kind: "run.update", conversationId: run.conversationId, value: projectRun(run) },
+    ];
+    const summary = conversationSummaryChange(tx, run.conversationId);
+    if (summary) changes.push(summary);
+    return { value: undefined, changes };
   }
 
   resolveAttempt(tx: StoreTransaction, input: ResolveAttemptInput): ServiceOutcome<void> {
@@ -326,6 +388,8 @@ export class RunControlService {
     }
 
     changes.push({ kind: "run.update", conversationId: run.conversationId, value: projectRun(run) });
+    const summary = conversationSummaryChange(tx, run.conversationId);
+    if (summary) changes.push(summary);
     return { value: undefined, changes };
   }
 

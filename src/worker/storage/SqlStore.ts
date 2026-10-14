@@ -4,8 +4,8 @@
 
 import type { ConfigurationStatusView, ConversationId, OwnerSnapshot } from "../../shared/domain";
 import type { ViewChange } from "../../shared/wire";
-import { parseJson } from "./Sql";
-import type { StorageBackend } from "./Sql";
+import { all, parseJson, run } from "./Sql";
+import type { StorageBackend, SqlExecutor } from "./Sql";
 import {
   ArtifactRepository,
   AttemptRepository,
@@ -34,6 +34,7 @@ import {
   projectRun,
   projectSubmission,
 } from "./projections";
+import { projectConversationSummary } from "./ConversationProjection";
 import type { ModelProfile } from "../types";
 
 export interface StoreTransaction {
@@ -112,6 +113,7 @@ export class SqlStore {
   migrate(): void {
     this.backend.transactionSync(() => {
       for (const statement of SCHEMA_STATEMENTS) this.backend.sql.exec(statement);
+      migrateCommandReceiptOutcome(this.backend.sql);
       const ownerState = new OwnerStateRepository(this.backend.sql);
       const settings = new SettingsRepository(this.backend.sql);
       ownerState.ensure();
@@ -175,18 +177,9 @@ export class SqlStore {
 
 export function buildSnapshot(tx: StoreTransaction, conversationId?: ConversationId): OwnerSnapshot {
   const revision = tx.ownerState.read().revision;
-  const conversations = tx.conversations.list().map((record) => {
-    const activeRun = tx.runs.activeForConversation(record.id);
-    const lastEntry = tx.entries.last(record.id);
-    const queuedCount = tx.submissions.listQueuedForConversation(record.id).length;
-    const summary = {
-      ...projectConversation(record),
-      queuedCount,
-    } as OwnerSnapshot["conversations"][number];
-    if (activeRun) summary.activeRunState = activeRun.state;
-    if (lastEntry?.text) summary.lastEntryPreview = lastEntry.text.slice(0, 120);
-    return summary;
-  });
+  const conversations = tx.conversations
+    .list()
+    .map((record) => projectConversationSummary(tx, record));
 
   const snapshot: OwnerSnapshot = {
     revision,
@@ -230,4 +223,15 @@ export function buildSnapshot(tx: StoreTransaction, conversationId?: Conversatio
   }
 
   return snapshot;
+}
+
+/**
+ * ADR-0001: version-2 receipt migration. Adds the outcome discriminator to an
+ * existing table and treats every prior row as `accepted`. Idempotent: the
+ * column check makes a repeated migration a no-op.
+ */
+function migrateCommandReceiptOutcome(sql: SqlExecutor): void {
+  const columns = all<{ name: string }>(sql, `PRAGMA table_info(command_receipts)`);
+  if (columns.some((column) => column.name === "outcome")) return;
+  run(sql, `ALTER TABLE command_receipts ADD COLUMN outcome TEXT NOT NULL DEFAULT 'accepted'`);
 }

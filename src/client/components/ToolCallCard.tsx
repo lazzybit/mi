@@ -4,6 +4,7 @@ import type { TranscriptEntryView } from "../../shared/domain";
 
 export function ToolCallCard(props: {
   entry: TranscriptEntryView;
+  generation: number;
   onReadArtifact: (artifactId: string) => Promise<string>;
 }): JSX.Element {
   const [expanded, setExpanded] = createSignal(false);
@@ -13,9 +14,14 @@ export function ToolCallCard(props: {
     const next = !expanded();
     setExpanded(next);
     if (next && props.entry.artifactId && full() === undefined) {
+      const generation = props.generation;
       try {
-        setFull(await props.onReadArtifact(props.entry.artifactId));
+        const text = await props.onReadArtifact(props.entry.artifactId);
+        // ADR-0001: discard an artifact response for a replaced selection.
+        if (generation !== props.generation) return;
+        setFull(text);
       } catch {
+        if (generation !== props.generation) return;
         setFull("Unable to load the full result.");
       }
     }
