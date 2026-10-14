@@ -1,8 +1,14 @@
 # Tasks: Build a mobile-first durable web harness
 
 - Created Date: 2026-10-14
-- Status: In progress
+- Status: Complete
 - Plan: [PLAN.md](./PLAN.md)
+
+Implementation is complete and deployed to `mi.nomonator.com`. Every milestone
+task is checked. The only verification that remains is manual: the owner-phone
+checks (software keyboard, screen lock, network changes) and the optional
+live-service smoke tests. See the implementation log for the deployed version
+and the verification results.
 
 This document tracks implementation. [PLAN.md](./PLAN.md) remains the
 authoritative reference for architecture, contracts, behavior, tests, and
