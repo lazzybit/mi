@@ -56,3 +56,12 @@ export function parseJson<T>(value: unknown, fallback: T): T {
 export function stringifyJson(value: unknown): string {
   return JSON.stringify(value ?? null);
 }
+
+/** Split a list into bounded batches for parameterized `IN (...)` deletes. */
+export function chunk<T>(values: readonly T[], size: number): T[][] {
+  const batches: T[][] = [];
+  for (let index = 0; index < values.length; index += size) {
+    batches.push(values.slice(index, index + size) as T[]);
+  }
+  return batches;
+}

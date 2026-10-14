@@ -4,6 +4,7 @@
 import {
   all,
   boolToInt,
+  chunk,
   count,
   first,
   intToBool,
@@ -876,9 +877,10 @@ export class LiveOutputRepository {
 
   // ADR-0001: live output for the conversation's attempts is removed first.
   deleteForAttempts(attemptIds: readonly string[]): void {
-    if (attemptIds.length === 0) return;
-    const placeholders = attemptIds.map(() => "?").join(",");
-    run(this.sql, `DELETE FROM live_output WHERE attempt_id IN (${placeholders})`, ...attemptIds);
+    for (const batch of chunk(attemptIds, 500)) {
+      const placeholders = batch.map(() => "?").join(",");
+      run(this.sql, `DELETE FROM live_output WHERE attempt_id IN (${placeholders})`, ...batch);
+    }
   }
 }
 
@@ -966,10 +968,11 @@ export class ArtifactRepository {
 
   // ADR-0001: remove identifiable conversation-exclusive payloads and chunks.
   deleteMany(ids: readonly string[]): void {
-    if (ids.length === 0) return;
-    const placeholders = ids.map(() => "?").join(",");
-    run(this.sql, `DELETE FROM artifact_chunks WHERE artifact_id IN (${placeholders})`, ...ids);
-    run(this.sql, `DELETE FROM artifacts WHERE id IN (${placeholders})`, ...ids);
+    for (const batch of chunk(ids, 500)) {
+      const placeholders = batch.map(() => "?").join(",");
+      run(this.sql, `DELETE FROM artifact_chunks WHERE artifact_id IN (${placeholders})`, ...batch);
+      run(this.sql, `DELETE FROM artifacts WHERE id IN (${placeholders})`, ...batch);
+    }
   }
 }
 
@@ -1649,9 +1652,14 @@ export class AttemptResolutionRepository {
 
   // ADR-0001: resolutions of the conversation's attempts are removed with it.
   deleteForAttempts(attemptIds: readonly string[]): void {
-    if (attemptIds.length === 0) return;
-    const placeholders = attemptIds.map(() => "?").join(",");
-    run(this.sql, `DELETE FROM attempt_resolutions WHERE attempt_id IN (${placeholders})`, ...attemptIds);
+    for (const batch of chunk(attemptIds, 500)) {
+      const placeholders = batch.map(() => "?").join(",");
+      run(
+        this.sql,
+        `DELETE FROM attempt_resolutions WHERE attempt_id IN (${placeholders})`,
+        ...batch,
+      );
+    }
   }
 }
 
