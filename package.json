@@ -13,7 +13,8 @@
     "test": "vitest run",
     "test:unit": "vitest run --project unit",
     "test:workers": "npm run build && vitest run --project workers",
-    "test:e2e": "playwright test"
+    "test:e2e": "playwright test",
+    "deploy": "npm run build && wrangler deploy"
   },
   "dependencies": {
     "@cfworker/json-schema": "4.1.1",
