@@ -305,8 +305,9 @@ required. Covers Change 13 and the mobile/browser tests.
   and `RecoveryPanel` (only for a real unresolved outcome, never a generic
   approval screen). Completion: queue/steer controls appear only during a run.
   Automated: run status, queued follow-up, and durable cancellation against a
-  held model response. `RecoveryPanel` for an unresolved remote outcome is not
-  yet automated (needs a fixture tool with an unknown outcome).
+  held model response; `RecoveryPanel` for a real unresolved remote outcome,
+  forced by evicting the object while a fixture tool call is dispatched, and
+  resolved without replay.
 - [x] **M6-T04 Settings and skill editors.** `SettingsScreen`,
   `ModelSettingsForm`, `McpConnectionList`, `McpConnectionEditor`, `SkillList`,
   `SkillEditor`, `ConversationSkillPicker`; single-column narrow layouts with no
@@ -319,9 +320,10 @@ required. Covers Change 13 and the mobile/browser tests.
   when generated function references change. Completion: pending commands
   survive a stale bundle and resend through the current reference. Automated:
   acknowledgement loss followed by a reload resends the pending command through
-  the current reference, and `offline` is set on network loss and clears on
-  recovery. `reconnecting` and `authentication_required` are not yet asserted in
-  the browser.
+  the current reference, `offline` is set on network loss and clears on
+  recovery, `reconnecting` is observed when the socket drops while online, and
+  `authentication_required` is set when an expired socket is closed on the next
+  publish.
 - [x] **M6-T06 Reconnect and device switching e2e.** Submission acknowledgement
   loss, duplicate resend, reconnect without waiting for a model response, and a
   second device seeing the same server state. Completion: automated e2e passes.
@@ -335,8 +337,8 @@ required. Covers Change 13 and the mobile/browser tests.
   in headless Chromium, so safe-area handling is verified structurally rather
   than visually.
 
-**Verification (M6).** Automated: the browser e2e suite above — 28 tests (14
-narrow + 14 wide) pass against the built Worker with fixture authentication.
+**Verification (M6).** Automated: the browser e2e suite above — 38 tests (19
+narrow + 19 wide) pass against the built Worker with fixture authentication.
 Owner-phone, pending and recorded manually: software-keyboard behavior, screen
 lock, and network changes (emulation alone does not establish these; no
 particular phone model required). Optional live smoke tests, only with
@@ -587,12 +589,11 @@ emulation) and `wide` projects run all 14 cases.
   typecheck` passes.
 - `npm run test:unit`: 97 passing.
 - `npm run test:workers`: 12 passing.
-- `npm run test:e2e`: 32 passing (16 narrow + 16 wide) in ~1.7 minutes.
+- `npm run test:e2e`: 38 passing (19 narrow + 19 wide) in ~2.1 minutes.
 
-**Open items.** The `RecoveryPanel` unresolved-outcome path and the
-`reconnecting`/`authentication_required` connection states are not yet automated.
-Owner-phone checks (software keyboard, screen lock, network changes) remain
-pending, as do the optional live smoke tests.
+**Open items.** Owner-phone checks (software keyboard, screen lock, network
+changes) remain pending, as do the optional live smoke tests. A >100-entry
+history-pagination scenario is not automated.
 
 ### 2026-10-14 — conversation skill picker and offline status
 
@@ -606,3 +607,22 @@ and ignores close events from replaced sockets. Browser coverage grew to 32
 passing cases (16 narrow + 16 wide) with `skills.spec.ts` and
 `connection.spec.ts`; `npm run test:unit` remains 97 passing and
 `npm run test:workers` 12 passing.
+
+### 2026-10-14 — recovery surface and remaining connection states
+
+Finished the last automatable M6 items. Two product bugs blocked the recovery
+surface: `buildSnapshot` only projected `dispatched`/`prepared` attempts, so an
+`unknown` attempt could never reach `RecoveryPanel`, and `resolveAttempt`
+published only a run change, so resolving an unresolved outcome did not update
+the client. Both are fixed, and a terminal run now clears its active attempt in
+the reducer.
+
+The suite gained `recovery.spec.ts`, which dispatches a fixture tool that never
+answers and then evicts the object (a fixture-only `/__fixture/evict` route that
+answers `409` until the dispatch intent is durable) so generation-restart
+recovery marks the attempt `unknown`; the panel appears, is not replayed, and
+can be resolved. `connection.spec.ts` now also covers `reconnecting` (proxying
+the real socket and dropping one connection) and `authentication_required` (an
+expiring assertion closed on the next publish from a second device). Browser
+coverage is 38 passing cases (19 narrow + 19 wide); `npm run test:unit` is 97
+passing and `npm run test:workers` 12 passing.
