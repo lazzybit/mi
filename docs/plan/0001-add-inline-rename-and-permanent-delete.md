@@ -5,182 +5,116 @@
 
 ## Target
 
-The owner can rename a conversation inline and permanently delete it from the
-conversation list, following ADR-0001.
+Implement conversation management according to ADR-0001 and its adopted
+interim artifact-cleanup approach.
 
 Completion requires:
 
-- Inline rename works during execution, supports keyboard and touch controls,
-  preserves failed input, and publishes the complete conversation summary.
-- Confirmed deletion checks authoritative execution state. A non-terminal run
-  prevents deletion; a cancellation request alone does not permit it.
-- Successful deletion atomically removes conversation-owned records and
-  exclusively owned artifacts, while preserving resources still used by
-  surviving records.
-- Execution cannot recreate deleted output, artifacts, entries, or attempts,
-  or publish changes for deleted work.
-- A definitive deletion refusal cannot become a successful deletion through
-  automatic retry after the run finishes.
-- Connected and reconnecting clients remove the conversation and its local
-  state without losing legitimate pending creates or unacknowledged deletes.
-- The legacy-artifact question below is resolved before claiming complete
-  permanent deletion for pre-existing conversations.
-- The specified unit, Worker, and browser verification passes.
+- Inline rename with explicit save/cancel, keyboard and touch support,
+  preserved failed input, and complete conversation summaries.
+- Confirmed deletion refused while any conversation run is non-terminal.
+- Atomic removal of conversation-owned records and identifiable exclusive
+  request/result payloads.
+- Preservation of shared resources and supported surviving local references.
+- Removal of the unused compaction-plan artifact write and atomic linking of
+  newly created execution payloads.
+- No execution writes or publication that restore deleted conversation data.
+- Stable deletion outcomes across lost acknowledgements and retries.
+- Consistent removal and browser-state cleanup across connected and
+  reconnecting clients.
+- Passing the verification specified below.
 
-ADR acceptance authorizes this planning stage. This PLAN remains Draft until
-its execution prerequisites are resolved and the user approves it.
+Pre-existing artifacts without verifiable ownership may remain, as expressly
+accepted in ADR-0001. Complete historical content erasure is not a completion
+claim. The root redesign and historical cleanup are recorded in
+[TODO](../TODO.md).
+
+This PLAN remains Draft. Adoption of the interim approach does not by itself
+authorize implementation of the entire plan.
 
 ## Start
 
 The starting behavior is the baseline recorded in ADR-0001.
 
-Rename already passes through the shared command contract, server function,
-OwnerRpc, runtime dispatch, domain service, and repository. Its published
-summary omits active-run state and the last-entry preview. The client has no
-rename control.
+Rename already has a command, server function, OwnerRpc method, runtime
+dispatch case, service, and repository operation. Its upsert omits activity
+and preview fields present in a full snapshot. The client exposes no editor.
 
-There is no conversation deletion operation. The existing
-`conversation.remove` wire change reaches every subscription, but no service
-emits it. The reducer removes the list item without clearing the selected
-conversation.
+Deletion has no command or storage path. The wire protocol and SyncHub
+already support `conversation.remove`; its reducer branch removes the list
+item but leaves the selected conversation intact.
 
-Conversation data spans the conversation, submission, run, attempt, entry,
-live-output, context-snapshot, skill-selection, and resolution tables. The
-schema has no foreign-key cascades. Artifact metadata and chunks are stored
-separately without creation provenance.
+Conversation data spans conversations, submissions, runs, attempts, entries,
+live output, context snapshots, skill selections, and attempt resolutions.
+The schema has no foreign-key cascades.
 
-Artifact creation and references established by the inspected code are:
+Artifacts combine several content classes:
 
-| Source or reference | Baseline behavior |
+| Content | Established relationship |
 | --- | --- |
-| Model and compaction requests | `RunDriver` creates request artifacts and links them from attempts. |
-| Tool requests and results | `RunDriver` creates artifacts and links them from attempts. Creation and linking occur in separate transactions. |
-| Model responses | Text and metadata are persisted in entries; there is no demonstrated separate result artifact for every model response. |
-| Transcript attachment | `entries.artifact_id` is supported by storage, although the inspected driver does not populate it. |
-| Resolution evidence | `attempt_resolutions.evidence_json` contains local artifact IDs. |
-| Skill resources | `skill_resources.artifact_id` references owner resources. |
-| Repository instructions | `repository_instructions.artifact_id` references owner resources. |
-| Compaction plan | `ContextAssembler.prepare` creates an artifact. The state machine returns its ID in an effect, but the driver does not persist that effect or the ID in the checkpoint. |
-| Application tool input | `app__read_tool_result` accepts a local `artifactId`; its arguments can also appear in persisted tool calls and request payloads. |
+| Model and compaction requests | Attempt request artifact ID |
+| Tool arguments and results | Attempt request/result artifact IDs |
+| Transcript attachment | Entry artifact ID; no demonstrated driver writer |
+| Resolution evidence | Artifact IDs in resolution evidence arrays |
+| Skill resources | Skill-resource artifact ID |
+| Repository instructions | Repository-instruction artifact ID |
+| Compaction plan | Created by context preparation; its returned effect ID is not persisted or consumed by the driver |
 
-The compaction-plan path therefore creates artifacts whose conversation cannot
-be identified from a persisted relationship. Separate artifact creation and
-attempt linking also permit unlinked artifacts if execution stops between
-transactions. Existing data has not been inventoried, so the number of such
-artifacts is unknown.
+Execution artifact creation and attempt linking currently use separate
+transactions. Interrupted execution can leave unlinked artifacts.
+The unused compaction-plan write creates another such source.
 
-`CommandProcessor` stores successful receipts. Its duplicate check compares
-the payload hash but not the command kind. `CommandDispatcher` retains every
-`CONFLICT` for retry. `AppActions.dispatch` discards the dispatch result.
+Application-defined `app__read_tool_result` calls can reference a local
+artifact through their arguments. External content containing similarly
+named fields does not establish a local reference contract.
 
-`OwnerRpcClient` reconstructs `AppError` on the server-side owner RPC hop.
-This does not establish that a custom error prototype or its properties
-survive the subsequent Solid server-function boundary to the browser.
+The command processor stores successful receipts and checks payload hashes
+without checking command kind. The dispatcher treats every `CONFLICT` as
+retryable, and app dispatch discards its outcome.
 
-Execution and cancellation have additional relevant behavior:
+OwnerRpcClient reconstructs AppError on the server-side owner RPC hop.
+Preservation through the separate Solid server-function boundary has not
+been established.
 
-- The command coordinator does not encompass driver execution.
-- `withExternalBudget` aborts a signal and awaits the underlying operation.
-  It is not a timeout race that immediately detaches that operation.
-- `runLoop` retains a stale in-memory run when reloading finds no row.
-- Output flushing does not check whether its attempt still exists.
-- Cancelling a paused run records a request, while driver selection can stop
-  at paused work before processing that cancellation.
-- Recovery can leave historical attempts alongside terminal runs. An attempt
-  state alone does not prove that a live worker can still write.
+The driver can retain a stale run when reloading finds no row. Output
+flushing does not validate attempt existence. Paused work can prevent
+persisted cancellation requests from being processed. The external budget
+helper aborts a signal and awaits the underlying operation; it does not
+immediately detach execution.
 
-The browser starts flushing its outbox before receiving a fresh snapshot.
-History loaded by `ConversationScreen` is not reset when selection changes.
-Drafts have a clear operation, but no enumeration for reconnect cleanup.
+The browser flushes its outbox before receiving a fresh snapshot. Loaded
+history is not reset on selection changes, and draft storage has no
+enumeration for reconnect cleanup.
 
 ## Architecture
 
-### Conversation operations
+Keep the existing authenticated command and synchronization paths.
 
-Keep mutations on the existing authenticated command path. Add deletion to
-the shared contract, server function, OwnerRpc, runtime, service, and registry.
+ConversationService owns authoritative deletion eligibility and transactional
+removal. Repositories own SQL. A shared summary builder serves snapshots and
+mutation changes.
 
-A shared conversation-summary builder supplies the same complete projection
-to snapshots and mutation changes. Execution changes that affect eligibility
-also refresh the summary, so list controls do not retain stale activity
-indicators.
+Artifact cleanup follows existing ownership links and supported local
+references. It adds no provenance table, ownership column, or historical
+backfill. Unattributable historical artifacts remain subject to the explicit
+ADR exception.
 
-`ConversationService` checks deletion eligibility and coordinates the
-transactional removal. Repositories own SQL and typed reference access.
+Execution payload creation is moved into the transaction that links the
+payload to its attempt. The unused compaction-plan artifact is removed.
 
-### Artifact provenance and references
+Runtime persistence boundaries validate current stored identities and
+execution state. Invalidated work stops without writing or publishing.
 
-Add an internal `artifact_provenance` table:
+Management commands expose serializable outcomes. Definitive deletion
+rejections are durable so that losing a rejection response cannot cause the
+same command to succeed later.
 
-- `artifact_id` is its primary key.
-- `scope` identifies `conversation` or `owner`.
-- `conversation_id` identifies the originating conversation for
-  conversation-scoped artifacts.
-- Absence of a provenance row identifies unresolved legacy provenance.
-
-A conversation origin records where content was created. It is not itself a
-claim that no other record uses that artifact. An artifact retained for a
-surviving reference can keep its historical origin until it is eventually
-removed.
-
-Every new artifact producer records provenance in the same transaction as
-artifact creation:
-
-- Driver and compaction-plan artifacts use conversation scope.
-- Skill-resource and repository-instruction artifacts use owner scope.
-
-A dedicated artifact-reference module enumerates local references from known
-application schemas. It includes direct columns, resolution evidence, and
-the documented `app__read_tool_result` argument shape. It must not interpret
-every arbitrary `artifactId` property in external content as a local
-reference.
-
-Deletion collects candidate artifacts before removing their referring
-records. It preserves candidates reachable from surviving application
-records and owner resources. Reference traversal must account for supported
-references inside retained request artifacts, so deleting one conversation
-does not break a surviving conversation's tool-result references.
-
-### Execution boundary
-
-Deletion refuses while any run in the conversation is non-terminal. The
-runtime additionally fences writes using persisted identity, generation, and
-expected state at asynchronous persistence boundaries.
-
-A stale execution operation stops without publishing changes. Buffered
-output for deleted attempts is discarded after deletion commits.
-
-Do not add a permanent deletion ban merely because a terminal run retains an
-`unknown`, `prepared`, or `dispatched` historical attempt. Establish whether
-execution can still write, then fence it. Historical recovery records are
-part of the data that permanent deletion removes.
-
-### Command outcomes
-
-Management server functions return an explicit serializable success/error
-result. Browser registry adapters convert an application error into a local
-`AppError` for the dispatcher. Transport uncertainty remains distinct.
-
-Persist definitive deletion rejections as minimal command outcomes, as well
-as successful receipts. This prevents a lost rejection response from allowing
-the same command to delete later after execution finishes.
-
-The app receives `DispatchResult` and displays pending, accepted, and rejected
-states.
-
-### Client reconciliation
-
-Fresh authoritative snapshots establish the order for reconnect cleanup and
-outbox replay. Explicit removal changes and accepted deletion receipts also
-establish that deletion occurred.
-
-The app owns selection and draft cleanup. Conversation-scoped rendering owns
-history and preview cleanup. The outbox tracks enough target identity to
-discard obsolete mutations without guessing from a bounded selected view.
+Fresh snapshots establish the reconnect boundary before browser cleanup and
+outbox replay. Selection-scoped state rejects stale asynchronous responses.
 
 ## Changes
 
-**1. Shared contracts and RPC plumbing**
+**1. Contracts and management command path**
 
 Files:
 
@@ -191,19 +125,14 @@ Files:
 - `src/worker/owner/OwnerRuntime.ts`
 - `src/client/commands/registry.ts`
 
-Add `DeleteConversationInput` and `conversation.delete`, preserving the public
-deletion receipt as `CommandReceipt<void>`.
+Add DeleteConversationInput, `conversation.delete`, and deleteConversation
+through the existing command processor. Keep the public successful deletion
+receipt as CommandReceipt<void>.
 
-Add `deleteConversation` to both the OwnerRpc interface and its base
-implementation. Route it through the existing command processor.
-
-Introduce a serializable management-command reply containing either a receipt
-or `ApiError`. Use it for rename and delete at the Solid server-function
-boundary. Catch known application errors there; unexpected transport or
-serialization failures retain their uncertain outcome.
-
-Registry adapters unwrap the reply and construct browser-local `AppError`
-instances. Do not rely on error-prototype preservation across the network.
+Return explicit serializable receipt/error replies for rename and delete
+across the Solid server-function boundary. Registry adapters reconstruct
+browser-local AppError instances. Unexpected transport failures retain an
+uncertain outcome.
 
 **2. Complete conversation summaries**
 
@@ -212,89 +141,73 @@ Files:
 - New `src/worker/storage/ConversationProjection.ts`
 - `src/worker/storage/SqlStore.ts`
 - `src/worker/conversations/services.ts`
-- Relevant driver and recovery publication paths
+- Relevant run and queue publication paths
 
-Extract a summary builder using the conversation record, active run, latest
-entry, and queued-submission count. Keep record-only projections in
-`projections.ts`.
+Build summaries from the conversation, active run, latest entry, and queued
+count. Use the same builder for snapshots, create, and rename.
 
-Use the builder for snapshot, create, and rename summaries. Publish refreshed
-summaries in transactions whose run or queue changes affect list eligibility.
+Refresh summaries when run or queue transitions change list eligibility.
+Keep existing title trimming and empty-title rejection.
 
-Preserve title validation already performed by the rename service.
-
-**3. Schema migration and artifact provenance**
-
-Files:
-
-- `src/worker/storage/schema.ts`
-- `src/worker/storage/records.ts`
-- `src/worker/storage/repositories.ts`
-- `src/worker/storage/SqlStore.ts`
-
-Increment the schema version to 2 and add `artifact_provenance` with indexes
-supporting conversation-scoped lookup.
-
-Extend command-receipt storage with an outcome discriminator defaulting to
-accepted for existing rows. Accepted results keep their current meaning;
-rejected deletion outcomes store only their structured application error.
-
-Implement an explicit, transactional version-1-to-version-2 migration. New
-table creation is additive. Guard the receipt-column alteration for fresh
-and existing stores, and advance the schema version only after migration
-succeeds. Repeated migration must be harmless.
-
-Backfill artifact provenance only where existing relationships establish it:
-
-- Shared skill-resource and repository-instruction records establish owner
-  scope.
-- Unambiguous request/result ownership from attempts can establish a
-  conversation origin.
-- A consumer reference alone, conflicting conversation references, timestamps,
-  and artifact content resemblance do not establish creation ownership.
-
-Record aggregate migration findings without logging artifact contents.
-Unresolved legacy provenance remains identifiable and is subject to the
-execution prerequisite under Open Questions.
-
-**4. Artifact creation and reference inventory**
+**3. Stop creating unlinked execution artifacts**
 
 Files:
 
 - `src/worker/context/ContextAssembler.ts`
+- `src/worker/runtime/RunMachine.ts`
 - `src/worker/runtime/RunDriver.ts`
-- `src/worker/context/RepositoryContextService.ts`
-- `src/worker/skills/SkillRegistry.ts`
+- Related context and transition tests
+
+Remove the unused compaction-plan artifact creation. Remove the now-unused
+artifact ID from the context-preparation result, transition event, and effect
+contracts. Keep compaction detection and actual compaction execution.
+
+Create request artifacts and insert their attempts in one transaction.
+Create result artifacts and update their attempts in one transaction.
+Metadata, chunks, and the owning link must roll back together.
+
+The actual compaction model request remains recorded through its attempt.
+Do not change skill-resource or repository-instruction storage.
+
+**4. Bounded artifact cleanup**
+
+Files:
+
 - New `src/worker/storage/ArtifactReferences.ts`
+- `src/worker/storage/repositories.ts`
+- `src/worker/conversations/services.ts`
 
-Require production artifact-creation paths to supply provenance. Record it
-atomically with metadata and chunks, including compaction plans and artifacts
-created before their attempt link.
+Before deleting records, collect candidates from the conversation's attempt
+request/result IDs and attachments whose ownership is established.
 
-Define reference readers for:
+An evidence or tool-input reference alone does not make an artifact a
+deletion candidate.
 
-- Attempt request/result artifact columns.
-- Entry artifact columns.
+Protect candidates used by surviving:
+
+- Attempt request/result links.
+- Entry attachment links.
 - Resolution-evidence arrays.
-- Skill-resource and repository-instruction artifact columns.
-- Persisted application tool calls with the exact supported
-  `app__read_tool_result` argument schema.
-- Those application calls when carried in known model-request history,
-  checkpoints, or entry metadata.
+- Skill-resource and repository-instruction links.
+- Application-defined `app__read_tool_result` calls in supported persisted
+  argument, checkpoint, entry-metadata, and request-history representations.
 
-Treat external tool results and opaque native provider data as opaque unless
-the application defines a local-reference contract for them.
+Follow supported local references where needed to protect surviving users.
+Do not interpret arbitrary external IDs or opaque provider fields as local
+references. A reference cycle within otherwise deleted data is not itself a
+surviving user.
 
-Build surviving-reference reachability from remaining records, artifacts
-owned by other existing conversations, and owner-scoped resources. Traverse
-supported artifact-to-artifact references without treating a candidate's own
-reference cycle as a surviving external user.
+Use explicit readers for these known representations. Keep cleanup limited
+to identifiable candidates; do not scan every unreferenced artifact for
+possible deletion.
 
-If an artifact survives deletion because another conversation references it,
-the reference inventory must allow its eventual removal when its final
-conversation user is deleted.
+Delete eligible candidate chunks and metadata in the conversation transaction.
+Preserve shared content. Leave historical artifacts whose ownership cannot
+be established untouched.
 
-**5. Transactional conversation removal**
+Add no artifact-provenance schema and perform no ownership backfill.
+
+**5. Atomic conversation removal**
 
 Files:
 
@@ -302,61 +215,59 @@ Files:
 - `src/worker/storage/repositories.ts`
 - `src/worker/storage/SqlStore.ts`
 
-Add repository operations for enumerating affected runs, attempts, artifacts,
-and resolution records, and for deleting conversation-owned rows. Reuse
-`selectForConversation(id, [])` for skill-selection removal; do not assume
-that a separate clear method already exists.
+Require the conversation to exist. Reject deletion with non-retryable
+CONFLICT while any run is queued, running, waiting_for_auth, or
+needs_attention.
 
-Within the command transaction:
+Collect affected run and attempt IDs before deleting dependent records.
+Remove live output, resolutions, entries, submissions, context snapshots,
+conversation skill selections, attempts, runs, and the conversation.
 
-1. Require the conversation to exist.
-2. Reject any non-terminal run with a non-retryable `CONFLICT`.
-3. Establish the execution fence and collect affected runtime IDs.
-4. Collect artifact candidates and supported references.
-5. Remove live output and resolutions while their attempt IDs are available.
-6. Remove entries, submissions, context snapshots, skill selections, attempts,
-   runs, and the conversation.
-7. Remove eligible candidate artifacts, their chunks, and provenance after
-   evaluating surviving references.
-8. Record the successful command receipt and removal change.
+Reuse `selectForConversation(id, [])` where appropriate rather than assuming
+a separate clear method exists.
 
-All data changes, receipt insertion, and revision allocation must roll back
-together on failure.
+Remove eligible artifact candidates after evaluating surviving references.
+Commit deletion, the successful receipt, and the owner revision atomically.
+Publish `conversation.remove` only after commit.
 
-Keep owner settings, skills and versions, connectors, credentials, repository
-instructions, and shared artifacts intact.
+Carry affected runtime IDs through an internal cleanup result without
+including their inventory in the public receipt.
 
-Carry typed internal deletion metadata to post-commit runtime cleanup without
-putting run or attempt inventories into the public receipt. Publish
-`conversation.remove` only after commit.
+Historical attempt states alone do not impose another deletion prohibition
+after runs are terminal and execution writes are fenced.
 
-**6. Durable command outcomes**
+**6. Stable deletion outcomes**
 
 Files:
 
 - `src/worker/rpc/CommandProcessor.ts`
-- Command-receipt records and repository
+- `src/worker/storage/schema.ts`
+- `src/worker/storage/records.ts`
+- Command-receipt repository and migration logic
 - `src/client/commands/CommandDispatcher.ts`
 
-Compare both command kind and payload hash when an ID already exists.
+Check both command kind and payload hash for duplicate IDs.
 
-For deletion, persist defined terminal application rejections, including
-active-work `CONFLICT` and `NOT_FOUND`. Roll back the rejected handler's
-transaction before recording a rejection under the command coordinator.
-Never commit partial deletion work to preserve an error result.
+Persist definitive deletion outcomes, including active-work CONFLICT and
+NOT_FOUND, as well as successful receipts. Roll back any rejected mutation
+before storing its rejection under the command coordinator.
 
-Replaying a rejected deletion returns the original rejection even if the
-conversation later becomes idle. A new deletion requires a new command ID.
+Replaying a rejected command returns the original rejection even after the
+run finishes. A new deletion attempt requires a new command ID.
 
-Keep outcome records free of conversation text and request/result bodies.
-Retain accepted create and submit receipts so their delayed retries cannot
-recreate deleted work.
+Add an outcome discriminator to command-receipt storage, treating existing
+rows as accepted. Use a transactional, idempotent schema-version-2 migration
+for this receipt change. There is no artifact-provenance migration.
 
-The dispatcher removes a definitive rejected deletion from the outbox.
-Transport failures retain the original ID. Avoid changing unrelated command
-retry policies as part of this feature.
+Retain minimal accepted create and submit receipts so their delayed retries
+cannot recreate deleted work. Store no conversation text or request/result
+bodies in deletion outcomes.
 
-**7. Execution fencing and cancellation completion**
+Drop definitive rejected deletes from the browser outbox. Preserve the same
+command ID for transport uncertainty. Keep unrelated command retry policies
+outside this change.
+
+**7. Execution boundary and cancellation completion**
 
 Files:
 
@@ -364,287 +275,193 @@ Files:
 - `src/worker/runtime/OutputCommitter.ts`
 - `src/worker/runtime/RecoveryService.ts`
 - `src/worker/owner/OwnerRuntime.ts`
-- Run-control service and wake-selection paths as necessary
+- Necessary run-control and wake-selection paths
 
 Stop the driver when reloading finds no run.
 
-Before conversation-specific writes after asynchronous work, validate the
-persisted conversation, run, current owner generation, and applicable
-attempt/state inside the same transaction as the write. This covers context
-preparation, artifact creation, attempt insertion or settlement, entries,
-state transitions, and output flushing.
+At persistence boundaries after asynchronous work, check the persisted
+conversation, run, applicable attempt/state, and execution generation in the
+same transaction as the write. Invalidated work must stop without another
+effect, persistence operation, or change publication.
 
-Claim execution for the current generation before driving recovered work.
-Do not add generation checks that accidentally prevent legitimate recovery
-of older persisted runs.
+Preserve legitimate recovery by claiming work for the current generation
+before applying generation fences.
 
-An invalidated execution returns an explicit stopped outcome. It must not
-continue with stale objects, dispatch another effect, or publish an update
-for a write that did not occur.
+Output flushing must validate its writable attempt and owning run.
+Post-commit deletion cleanup discards buffered content and flush metadata
+without writing it back to storage.
 
-Output flushing validates a writable attempt and its owning run. Add
-memory-only buffer disposal for post-commit deletion cleanup, including
-`lastFlush` state. Cleanup must not flush discarded content or create another
-storage transaction to restore output.
+Ensure cancellation requests on paused work can reach a terminal state
+without object reconstruction. Process cancellation before paused work blocks
+driver selection, and schedule the required wake.
 
-Preserve cooperative cancellation semantics. Ensure persisted cancellation
-requests on paused runs can reach a terminal state without requiring object
-reconstruction. Process such requests before paused work blocks driver
-selection, and schedule the necessary wake. Keep unresolved remote-outcome
-evidence until normal resolution or permanent deletion.
+Keep this work limited to making cancellation and deletion usable and
+preventing late writes. Do not redesign recovery or remote-effect semantics.
 
-Retaining a historical uncertain attempt must not create an additional,
-undocumented permanent deletion restriction once the run is terminal and
-writes are fenced.
-
-**8. Client operation results and controls**
+**8. Client management controls**
 
 Files:
 
 - `src/client/components/types.ts`
 - `src/App.tsx`
 - `src/client/components/ConversationList.tsx`
-- Components accepting the existing dispatch callback
+- Existing dispatch callback consumers
 - `src/styles.css`
 
-Return `Promise<DispatchResult>` from app dispatch and update callback
-consumers to remain type-correct.
+Return DispatchResult from app dispatch and update affected callback types.
 
-Add explicit inline edit, save, and cancel controls. Enter saves except during
-IME composition; Escape cancels; blur alone does not submit. Trim input,
-reject an empty title, prevent duplicate submission while pending, and retain
-the entered value on rejection.
+Provide inline edit, save, and cancel controls. Enter saves except during IME
+composition; Escape cancels; blur alone does not submit. Preserve rejected
+input and show pending/error state.
 
-Add a delete confirmation naming the conversation and explaining permanent
-history removal. Show current execution restrictions and definitive server
-rejections. A stale client eligibility view never replaces the server check.
+Provide a confirmation naming the conversation and explaining permanent
+history removal. Explain execution restrictions and display authoritative
+rejections. Client eligibility indicators never replace the server check.
 
-Keep uncertain operations visibly pending. Handle command outcomes settled
-by later outbox replay, not only the first click's promise.
+Handle outcomes completed by later replay, not only the initial click.
+Prevent duplicate clicks from issuing new commands while an outcome is
+unknown.
 
-Place controls beside the selection button rather than nesting interactive
-controls inside it. Preserve keyboard focus, accessible labels, touch targets,
-and narrow layouts.
+Keep management controls beside the selection button, with accessible
+labels, focus behavior, touch targets, and narrow-layout support.
 
-**9. Authoritative removal and browser cleanup**
+**9. Removal, reconnect, and browser cleanup**
 
 Files:
 
 - `src/client/sync/ConversationReducer.ts`
 - `src/client/sync/ConversationFeed.ts`
-- `src/App.tsx`
 - `src/client/storage/DraftStore.ts`
+- `src/client/commands/CommandOutbox.ts`
+- `src/client/commands/CommandDispatcher.ts`
+- `src/App.tsx`
 - `src/client/components/ConversationScreen.tsx`
 - `src/client/components/Transcript.tsx`
 - `src/client/components/ToolCallCard.tsx`
 
-Clear the selected snapshot only when it belongs to the removed conversation.
-Clear matching app and feed selections, and clear the displayed draft.
-Preserve selection when another conversation is removed.
+Clear matching selected snapshot, app selection, feed selection, and draft.
+Removing another conversation preserves the current selection.
 
-Add draft enumeration or reconciliation so fresh snapshots can remove drafts
-for conversations deleted while this device was offline.
+Reset conversation-scoped history and previews. Use selection generations
+to discard late responses, including after selecting the same conversation
+again. Ignore messages from replaced sockets.
 
-Reset conversation-scoped history and preview state when selection changes.
-Capture a selection generation for asynchronous history and artifact requests;
-discard responses after that generation is invalidated, including when the
-same conversation is selected again later.
+Distinguish fresh snapshots from reduced changes and maintain snapshot
+revision correctly.
 
-Ignore messages from replaced WebSocket instances. Preserve stream-sequence
-checks and update snapshot revision when applying a committed change frame.
+Add draft enumeration and optional outbox target metadata for conversation,
+run, submission, and attempt mutations. Preserve existing outbox records
+during its schema upgrade.
 
-Expose a distinction between a fresh server snapshot and a locally reduced
-change so reconnect processing has an explicit synchronization boundary.
+On startup and reconnect, receive a fresh authoritative snapshot, reconcile
+local state, then replay pending commands in order. Serialize replay and
+prevent new commands from bypassing this boundary.
 
-**10. Outbox reconciliation and replay order**
+Preserve pending creates and unacknowledged deletes. Discard obsolete scoped
+mutations only when their target deletion is established. For legacy entries
+without sufficient target metadata, let server lookups settle them; absence
+from a bounded selected snapshot is not proof of deletion.
 
-Files:
+**10. Decision references and deferred work**
 
-- `src/client/commands/CommandOutbox.ts`
-- `src/client/commands/CommandDispatcher.ts`
-- `src/client/commands/registry.ts`
-- `src/App.tsx`
+Add concise English ADR-0001 comments near changed responsibilities.
+Keep the root storage redesign and historical-retention limitation in
+`docs/TODO.md`.
 
-Persist optional command-target metadata sufficient to associate new
-conversation, run, submission, and attempt mutations with their conversation.
-Upgrade existing outbox storage without discarding its entries.
-
-On startup and reconnect:
-
-1. Open the outbox and establish the connection.
-2. Receive a fresh authoritative snapshot.
-3. Reconcile deleted-conversation browser state and scoped pending mutations.
-4. Replay the remaining commands in order.
-
-Serialize reconciliation and replay so competing snapshots cannot flush the
-same queue concurrently.
-
-Preserve pending creates and unacknowledged deletes. An accepted create receipt
-for a conversation subsequently deleted must not recreate a list item or
-select the deleted ID.
-
-Discard obsolete mutations whose deleted target is established by authoritative
-state. For legacy entries lacking sufficient target metadata, do not infer
-that a run is missing merely because it is absent from the bounded selected
-snapshot. Let the existing server lookup settle those commands definitively.
-
-Prevent fresh mutations queued during reconnect from bypassing the same
-reconciliation boundary.
-
-**11. ADR references**
-
-Add concise English `ADR-0001` comments near the changed responsibilities:
-management commands, deletion ownership, execution fences, and client
-reconciliation. Avoid repeating the reference on every line.
+Do not introduce a new ADR for that redesign until the work is actually
+undertaken.
 
 ## Behavior
 
-### Rename
+Rename remains available during every run state and preserves activity,
+queue count, and preview.
 
-Renaming remains available in every run state. A successful change preserves
-activity, queue count, and preview in the list and synchronizes to other
-devices.
+Delete is blocked by any non-terminal run. A cancellation request alone does
+not satisfy eligibility. Terminal historical attempts may be removed once
+execution is fenced.
 
-A failed edit remains editable. A transport-uncertain edit retains its command
-identity; repeated automatic sends must not create new logical commands.
+If a submission commits before deletion, deletion sees active work and
+fails. If deletion commits first, submission finds no conversation.
 
-### Delete eligibility
+Successful delete replay returns the accepted receipt. Rejected delete
+replay returns its original rejection, including when that rejection's
+response was lost. No old refusal becomes a later automatic deletion.
 
-The server rejects deletion if any run is `queued`, `running`,
-`waiting_for_auth`, or `needs_attention`.
+Failure during deletion rolls back dependent-row removal, artifact removal,
+and successful receipt insertion. No removal change is published.
 
-Requesting cancellation does not immediately change eligibility. Once the
-run is terminal and writes are fenced, historical attempt records are removed
-with the conversation.
+Identifiable exclusive payloads are removed. Shared resources survive.
+Previously unattributable payloads may remain under the accepted exception;
+the operation is not described as complete historical content erasure.
 
-A submission racing deletion is serialized by authoritative transactions:
-if submission wins, deletion sees active work and fails; if deletion wins,
-the submission finds no conversation.
+A stale execution continuation cannot recreate deleted conversation data.
+Deleting the selected conversation shows the existing empty screen.
+Other devices converge through removal changes or fresh snapshots.
 
-### Outcomes and retries
-
-A successful delete returns its durable receipt. A repeated accepted command
-returns that receipt after the conversation is gone.
-
-A rejected delete remains rejected for the same command ID. This includes a
-rejection whose response was lost before reaching the browser. Finishing the
-run does not activate the old deletion request.
-
-An unrelated new command targeting a missing conversation receives
-`NOT_FOUND`.
-
-### Data and execution
-
-Removal is atomic. An injected storage failure leaves both the conversation
-and its dependent records intact and produces no removal frame.
-
-Exclusive artifacts and their chunks disappear. Shared local references
-remain valid. Deletion does not reverse effects performed by remote tools.
-
-Late or stale execution cannot create conversation-owned data after deletion.
-Owner-global maintenance remains governed by its own resource lifecycle.
-
-### Devices and local state
-
-Deleting the selected conversation returns that device to the existing empty
-conversation screen. Other devices converge through removal changes or fresh
-snapshots.
-
-Local cleanup occurs after authoritative deletion is known. A device that is
-offline performs cleanup when it reconnects.
-
-Pending deletes remain until their own outcome is settled, even when a removal
-frame arrives first. Pending creates are not discarded because their eventual
-conversation is absent from the current snapshot.
+Offline cleanup runs after authoritative state is available. Unacknowledged
+deletes remain until their own outcome is settled.
 
 ## Tests
 
-Use existing test backends and suites. Add focused tests where destructive
-behavior, migration, asynchronous execution, or durable retries need proof.
+Use the existing unit, Worker, and browser suites.
 
-### Storage and domain tests
+Storage and domain coverage:
 
-Extend `tests/unit/storage.test.ts`, `idempotency.test.ts`, and add
-`tests/unit/conversations.test.ts` as appropriate.
-
-Cover:
-
-- Fresh version-2 storage and repeated migration from a populated version-1
-  fixture.
-- Provenance for every artifact producer, including unlinked compaction plans.
-- Provable backfill, shared ownership, and unresolved legacy classification.
+- Fresh and populated version-1 receipt migration, including repeat migration.
+- Atomic request/attempt and result/attempt persistence with rollback.
+- Compaction still works without creating the unused plan artifact.
 - Removal of every conversation-owned table.
-- Transaction rollback after an injected mid-deletion failure.
-- Every blocking run state and a pending cancellation.
-- Terminal historical uncertain attempts without live writers.
-- Exclusive artifacts, shared artifacts, resolution-only references, and
-  typed application-tool references.
-- Reference cycles and eventual removal after the final conversation user is
-  deleted.
-- Preservation of owner resources.
-- Accepted create, submit, and delete receipt replay after deletion.
-- Rejected-delete replay after the run finishes, including lost rejection
-  acknowledgement.
-- Command ID reuse with a different kind or payload.
-- Complete rename summaries during active and queued work.
+- Mid-deletion failure rolls back all removals.
+- Each blocking run state and cancellation still pending.
+- Terminal historical attempts without live writers.
+- Exclusive payload removal and preservation of each supported surviving
+  reference source.
+- Evidence-only references do not establish ownership.
+- Unattributable historical artifacts remain untouched.
+- Accepted create, submit, and delete replay after deletion.
+- Rejected-delete replay after execution finishes and after a lost response.
+- Duplicate IDs with changed command kind or payload.
+- Complete rename summaries during execution.
 
-### Runtime tests
+Runtime coverage:
 
-Extend `tests/unit/execution.test.ts` and `recovery.test.ts`.
+- Actual in-flight deletion refusal.
+- Paused cancellation completion.
+- Missing-run, stale-generation, and late-output writes being discarded.
+- No late artifacts, entries, attempts, or publication after deletion.
+- Legitimate recovery continuing to work.
 
-Use controllable model/tool operations and deterministic barriers to cover:
-
-- Deletion refusal during an actual in-flight operation.
-- Cancellation of paused work reaching a terminal state.
-- Late output flushes after deletion.
-- Stale-generation and missing-run writes being discarded.
-- No late artifacts, entries, attempts, or publication after removal.
-- Normal recovery and cancellation continuing to work with the new fences.
-
-### Client and synchronization tests
-
-Extend `tests/unit/client.test.ts` and `sync.test.ts`.
-
-Cover:
+Client and synchronization coverage:
 
 - Selected and unselected removal.
-- Terminal deletion rejection leaving the outbox.
-- Uncertain deletion retaining the original command ID.
-- Fresh-snapshot reconciliation preceding replay.
+- Definitive rejection leaving the outbox.
+- Uncertain deletion retaining its command ID.
+- Fresh-snapshot reconciliation before replay.
 - Pending-create and unacknowledged-delete preservation.
-- Legacy outbox entries with incomplete target metadata.
-- Draft cleanup, selection-generation response guards, and replaced-socket
-  messages.
-- Removal delivery to subscriptions selecting other conversations.
+- Legacy commands without target metadata.
+- Draft cleanup and stale history/artifact response rejection.
+- Replaced-socket messages and removal across subscriptions.
 
-### Worker and browser tests
+Worker and browser coverage:
 
-Extend `tests/workers/owner.test.ts` for deletion, migration, isolation,
-receipt replay, and structured rejection through the actual owner RPC path.
-
-Extend `tests/e2e/conversations.spec.ts`, `execution.spec.ts`, and relevant
-connection fixtures for:
-
-- Inline save/cancel, empty titles, IME composition, and failed-input retention.
+- Owner RPC deletion, isolation, rejection, and receipt replay.
+- Structured application errors crossing the Solid server-function boundary.
+- Inline save/cancel, empty titles, IME behavior, and failed-input retention.
 - Rename during execution without losing activity indicators.
-- Delete confirmation and cancellation of confirmation.
-- Active-work rejection reaching the browser as a definitive error.
-- Successful deletion, reload persistence, and absence of the old transcript.
-- A second connected device observing deletion.
-- An offline device reconciling drafts and pending work after reconnect.
-- Stale history or artifact responses after selection changes.
-- Keyboard operation and narrow layouts.
+- Confirmed deletion and cancellation of confirmation.
+- Reload persistence and a second device observing removal.
+- Offline reconnection, pending work, keyboard operation, and narrow layouts.
 
-The browser rejection test must exercise the Solid server-function boundary;
-an in-process `AppError` test alone is insufficient.
+Extend existing files under `tests/unit`, `tests/workers`, and `tests/e2e`.
+Add a focused conversation-domain test file where it improves clarity.
 
 ## Verification
 
-During this documentation stage:
+For this documentation stage:
 
-1. Verify the ADR remains Accepted and this PLAN remains Draft.
-2. Inspect the complete documentation diff, including newly created files.
-3. Confirm no implementation files changed.
+1. Confirm the ADR is Accepted and this PLAN is Draft.
+2. Inspect the complete documentation diff.
+3. Confirm only the ADR, PLAN, and TODO changed.
 
 After implementation is authorized:
 
@@ -653,84 +470,58 @@ After implementation is authorized:
 3. `npm run test:workers`
 4. `npm run test:e2e`
 
-The Worker script already runs the build. Record actual outcomes and any
-environmental blockers in the eventual implementation report.
+The Worker script already runs the build. Record actual outcomes in the
+implementation report.
 
-Verify the deletion invariants through persisted data and observed frames,
-not only disappearance of the list item.
-
-Completion also requires resolution of the legacy-artifact prerequisite and
-the planned ADR references. Passing tests alone does not resolve unknown
-ownership of pre-existing data.
+Verify persisted rows and observed synchronization frames, not only removal
+of a list item. No production artifact inventory is required to approve this
+interim approach.
 
 ## Out of scope
 
-- Trash, archive, restore, pinning, bulk deletion, and export.
+- Redesigning the generic artifact abstraction.
+- Artifact-provenance tables and historical ownership backfill.
+- Global artifact garbage collection or historical unlinked-artifact purges.
+- Trash, restore, archive, pinning, bulk deletion, and export.
 - Undoing remote tool effects.
-- Deleting shared skills, connectors, credentials, repository instructions, or
-  owner settings as a consequence of conversation deletion.
-- A general-purpose artifact garbage collector unrelated to this operation.
-- General execution-engine or command-system redesign beyond the fences,
-  cancellation completion, and deletion-outcome handling required here.
-- Deployment during the documentation stage.
-
-Pre-existing conversation artifacts are not excluded from permanent-deletion
-requirements. Their unresolved attribution is an execution prerequisite below.
+- Removing shared skills, repository instructions, connectors, credentials,
+  or settings through conversation deletion.
+- General execution or command-system redesign beyond the required deletion
+  guarantees.
+- Implementation or deployment during this documentation stage.
 
 ## Risks
 
-**Unattributed legacy content.** Existing artifacts may contain conversation
-payloads without an ownership relationship. Guessing an owner can destroy
-unrelated resources; retaining them silently can make deletion incomplete.
-Resolve the migration policy explicitly before approving execution.
+**Historical payload retention.** Unattributable artifacts may contain
+conversation data. This is the accepted temporary limitation, recorded in
+ADR-0001 and TODO. Do not conceal it or claim complete content erasure.
 
-**Incomplete reference discovery.** Direct SQL columns alone miss resolution
-evidence and application-defined tool references. Maintain one documented
-reference inventory, typed readers, and tests for every supported source.
-Do not use arbitrary string matching as ownership evidence.
+**Incomplete references.** A missed supported reference can break a surviving
+user. Maintain one explicit reference inventory and tests for its known
+representations. Avoid arbitrary string matching.
 
-**Execution and recovery regressions.** A generation fence can reject valid
-recovered work if it compares only stale persisted generations. Explicitly
-claim execution and test both stale rejection and legitimate recovery.
+**Execution regressions.** Write fences must reject stale continuations
+without preventing valid recovery. Test both paths and paused cancellation.
 
-**Delayed destructive commands.** Client-only rejection handling cannot
-protect a rejection response lost in transport. Persist terminal deletion
-outcomes so retry semantics remain stable.
+**Delayed deletion.** Persist terminal outcomes so a lost rejection response
+cannot turn into a later successful destructive command.
 
-**Migration failure.** Adding provenance and outcome storage must preserve
-existing data and successful receipts. Keep migration transactional,
-idempotent, and covered by a populated version-1 fixture.
+**Migration compatibility.** Preserve existing successful receipts during the
+outcome migration and test a populated prior schema.
 
-**Large reference scans.** Atomic deletion must remain within transaction
-limits. Index direct lookups, avoid loading unrelated payloads repeatedly, and
-test representative large histories. If the required workload cannot fit the
-atomic design, revise the PLAN before substituting partial cleanup.
+**Cleanup cost.** Index direct lookups and avoid repeatedly loading unrelated
+payloads. Test representative histories. Do not substitute partial removal
+for atomic deletion without revising the plan.
 
-**Browser races.** Reconnect, outbox replay, selection changes, and delayed
-responses can restore obsolete state. Use an explicit snapshot boundary,
-serialized replay, and selection-generation checks.
+**Browser races.** Use a fresh-snapshot boundary, serialized replay, and
+selection generations to prevent obsolete state from returning.
 
 ## Open Questions
 
-**How should legacy artifacts with no provable ownership be handled?**
+None for adopting the interim artifact approach.
 
-The baseline proves that unlinked artifacts can be created, but no inventory
-has established whether affected data exists in the target stores.
+The user has accepted retention of pre-existing artifacts without verifiable
+ownership. Historical inventory and the root lifecycle redesign are deferred
+in TODO rather than blocking this feature.
 
-Before PLAN approval, determine whether existing relationships and a
-read-only artifact inventory can establish ownership without guessing. Do not
-log or publish artifact payloads as part of that inventory.
-
-The proposed disposition is:
-
-- Backfill ownership where evidence establishes it.
-- If no unresolved artifacts remain, close this prerequisite with evidence.
-- If unresolved artifacts remain, prepare a concrete migration or cleanup
-  proposal identifying the affected artifact classes, what would be retained
-  or removed, and how shared resources are protected.
-- Obtain agreement on that proposal before destructive migration. Do not
-  silently defer the content to future garbage collection or claim complete
-  permanent deletion while it remains attributable only by guesswork.
-
-No implementation is authorized by this Draft PLAN. The accepted ADR remains
-the governing decision while this prerequisite is resolved.
+This PLAN remains Draft until the user approves its implementation scope.

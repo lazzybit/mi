@@ -46,9 +46,10 @@ Management actions must respect execution state. Changing a title must remain
 available during execution, while deletion must not destroy state still
 needed by running work or recovery.
 
-Permanent deletion must remove conversation-owned content, including stored
-request and result payloads. Shared owner resources must remain available to
-their other users.
+Permanent deletion must remove conversation-owned content, including
+identifiable stored request and result payloads. Shared owner resources must
+remain available to their other users. The adopted interim approach has the
+explicit historical-retention exception described below.
 
 The client must distinguish pending work, successful commands, and definitive
 rejections. Other devices must converge on the same conversation state,
@@ -112,16 +113,44 @@ revision. Remove:
 - Its runs, attempts, and live output.
 - Its context snapshots and attempt-resolution records.
 - Its conversation-to-skill selections.
-- Artifacts and artifact chunks owned exclusively by the deleted conversation.
+- Identifiable artifacts and artifact chunks owned exclusively by the deleted
+  conversation and unused by surviving records.
 
-Collect the relevant artifact references before deleting their referring
-records. Remove conversation artifacts when no surviving application record
-references them. Reference discovery must include structured references such
-as resolution evidence, not only direct transcript links.
+Use existing, verifiable ownership relationships for the interim
+implementation. Before removing referring records, collect request/result
+artifact IDs from the conversation's attempts and any attachments whose
+conversation ownership is established.
 
-The PLAN must inventory artifact creation and reference paths and establish
-how exclusive ownership is determined. Deferring all artifact cleanup to
-future garbage collection does not satisfy this decision.
+Resolution evidence and application-tool inputs are references, not proof
+that their containing conversation owns the referenced artifact. Preserve
+candidate artifacts used by surviving attempts, entries, resolution evidence,
+skill resources, repository instructions, or supported application-defined
+local references such as `app__read_tool_result`.
+
+Do not introduce an artifact-provenance table or historical ownership
+backfill for this feature.
+
+Stop creating new unlinked conversation artifacts. Remove the unused
+compaction-plan artifact write: the driver does not consume its returned
+effect ID, and the actual compaction request is stored separately. Create
+request artifacts with their attempt insertion and result artifacts with
+their attempt update in the same transaction.
+
+**Adopted temporary exception.** Pre-existing artifacts without a verifiable
+ownership relationship are not removed by this operation. Historical
+compaction-plan artifacts and payloads stranded before attempt linking may
+therefore remain. This exception does not permit retaining identifiable
+exclusive conversation payloads.
+
+The operation permanently removes conversation records and identifiable
+exclusive payloads; it does not guarantee complete content erasure of
+previously unattributable payloads. Do not guess ownership or perform a
+global purge.
+
+The underlying separation of execution payloads, skill resources, and
+repository instructions by ownership and lifecycle is deferred and recorded
+in [TODO](../TODO.md). Historical inventory and cleanup belong to that work;
+they are not prerequisites for preparing or approving this interim plan.
 
 Keep resources that remain shared, including skill definitions and versions,
 repository instructions, connectors, credentials, and owner settings.
@@ -173,10 +202,17 @@ Inline editing provides a direct way to change a title and reuses the existing
 rename operation. Allowing it during execution distinguishes harmless metadata
 changes from operations that would invalidate execution state.
 
-Permanent deletion requires removing stored conversation payloads as well as
-the conversation row. Leaving all artifacts behind would retain model
-requests, results, or other conversation content. Reference-aware removal
-preserves resources still used elsewhere.
+Removing identifiable conversation payloads as well as the conversation row
+provides a bounded interim deletion operation. Reference-aware removal
+preserves resources still used elsewhere. Atomic payload linking and removal
+of the unused compaction-plan write prevent the demonstrated sources of new
+unlinked conversation artifacts.
+
+The accepted historical-retention exception avoids guessing ownership of
+existing unlinked content. It is an explicit limitation, not complete content
+erasure. Separating the different content lifecycles addresses the root
+problem and is recorded in TODO instead of expanding this feature into an
+artifact-storage redesign.
 
 Refusing deletion during non-terminal work preserves the state needed for
 execution and recovery. Implicit cancellation is insufficient because remote
