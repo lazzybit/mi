@@ -5,7 +5,7 @@ import { SkillEditor } from "./SkillEditor";
 
 export function SkillList(props: {
   skills: SkillView[];
-  dispatch: (kind: string, payload: unknown) => Promise<void>;
+  dispatch: (kind: string, payload: unknown) => Promise<unknown>;
 }): JSX.Element {
   const [editing, setEditing] = createSignal<string | "new">();
   return (

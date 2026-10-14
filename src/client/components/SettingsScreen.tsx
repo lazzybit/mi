@@ -7,7 +7,7 @@ import { SkillList } from "./SkillList";
 
 export function SettingsScreen(props: {
   configuration: ConfigurationStatusView;
-  dispatch: (kind: string, payload: unknown) => Promise<void>;
+  dispatch: (kind: string, payload: unknown) => Promise<unknown>;
 }): JSX.Element {
   const [tab, setTab] = createSignal<"model" | "connectors" | "skills">("model");
   return (

@@ -8,6 +8,7 @@ export function Transcript(props: {
   entries: TranscriptEntryView[];
   onLoadOlder: () => void;
   hasOlder: boolean;
+  generation: number;
   onReadArtifact: (artifactId: string) => Promise<string>;
 }): JSX.Element {
   let container: HTMLDivElement | undefined;
@@ -47,10 +48,18 @@ export function Transcript(props: {
               <AssistantMessage entry={entry} />
             </Show>
             <Show when={entry.kind === "tool_call"}>
-              <ToolCallCard entry={entry} onReadArtifact={props.onReadArtifact} />
+              <ToolCallCard
+                entry={entry}
+                generation={props.generation}
+                onReadArtifact={props.onReadArtifact}
+              />
             </Show>
             <Show when={entry.kind === "tool_result"}>
-              <ToolCallCard entry={entry} onReadArtifact={props.onReadArtifact} />
+              <ToolCallCard
+                entry={entry}
+                generation={props.generation}
+                onReadArtifact={props.onReadArtifact}
+              />
             </Show>
           </article>
         )}

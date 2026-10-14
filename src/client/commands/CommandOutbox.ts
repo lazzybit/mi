@@ -2,10 +2,21 @@
 // payload, command id, and schema version — never generated server-function
 // URLs or build ids — so a stale bundle can resend the same logical command
 // through the current function reference.
+//
+// ADR-0001: an optional target identifies the records a scoped mutation
+// touches, so reconnect cleanup can discard obsolete mutations once their
+// target deletion is established.
 
-export const OUTBOX_SCHEMA_VERSION = 1;
+export const OUTBOX_SCHEMA_VERSION = 2;
 
 export type PendingCommandState = "local_pending" | "sending" | "accepted" | "rejected";
+
+export interface PendingCommandTarget {
+  conversationId?: string;
+  runId?: string;
+  submissionId?: string;
+  attemptId?: string;
+}
 
 export interface PendingCommand {
   commandId: string;
@@ -14,6 +25,7 @@ export interface PendingCommand {
   schemaVersion: number;
   createdAt: number;
   state: PendingCommandState;
+  target?: PendingCommandTarget;
 }
 
 const STORE = "commands";
@@ -30,6 +42,7 @@ export class CommandOutbox {
         const request = indexedDB.open(DB_NAME, OUTBOX_SCHEMA_VERSION);
         request.onupgradeneeded = () => {
           const db = request.result;
+          // Version upgrades keep the existing store and its records.
           if (!db.objectStoreNames.contains(STORE)) db.createObjectStore(STORE, { keyPath: "commandId" });
         };
         request.onsuccess = () => resolve(request.result);
