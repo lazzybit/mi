@@ -5,6 +5,7 @@
 // metadata follows the documented fallback order for issuers with and without a
 // path.
 
+import { globalFetch } from "./globalFetch";
 import { AppError } from "../../shared/domain";
 
 export interface AuthDiscoveryResult {
@@ -35,7 +36,7 @@ interface AuthorizationServerMetadata {
 }
 
 export class AuthDiscovery {
-  constructor(private readonly fetchImpl: typeof fetch = fetch) {}
+  constructor(private readonly fetchImpl: typeof fetch = globalFetch) {}
 
   async discover(endpoint: string, challenge?: string): Promise<AuthDiscoveryResult> {
     const resourceUrl = new URL(endpoint);

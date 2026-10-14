@@ -3,6 +3,7 @@
 // state, and consumes the callback state before exchanging the code. A failed
 // reconstruction never loops on a consumed code or a rotated refresh token.
 
+import { globalFetch } from "./globalFetch";
 import { AppError } from "../../shared/domain";
 import { sha256Hex } from "../../shared/json";
 import type { SqlStore } from "../storage/SqlStore";
@@ -34,7 +35,7 @@ export class OAuthCoordinator {
   private readonly fetchImpl: typeof fetch;
 
   constructor(private readonly deps: OAuthCoordinatorDeps) {
-    this.fetchImpl = deps.fetchImpl ?? fetch;
+    this.fetchImpl = deps.fetchImpl ?? globalFetch;
   }
 
   async begin(connectorId: string): Promise<{ authorizationUrl: string }> {

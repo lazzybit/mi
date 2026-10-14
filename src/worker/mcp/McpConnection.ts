@@ -5,6 +5,7 @@
 // session may repeat initialization and discovery, but must never repeat an
 // unresolved tool invocation.
 
+import { globalFetch } from "./globalFetch";
 import { parseSse } from "../models/sse";
 import type { McpConnection, NormalizedToolResult, ServerCapabilities, ToolPage } from "./types";
 
@@ -36,7 +37,7 @@ export class StreamableHttpConnection implements McpConnection {
   constructor(
     private readonly endpoint: string,
     private readonly headers: Headers,
-    private readonly fetchImpl: typeof fetch = fetch,
+    private readonly fetchImpl: typeof fetch = globalFetch,
   ) {}
 
   async initialize(signal: AbortSignal): Promise<ServerCapabilities> {

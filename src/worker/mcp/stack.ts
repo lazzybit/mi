@@ -1,5 +1,6 @@
 // The MCP subsystem wiring (PLAN.md -> Components -> `src/worker/mcp/`).
 
+import { globalFetch } from "./globalFetch";
 import { AppError } from "../../shared/domain";
 import type { SqlStore } from "../storage/SqlStore";
 import type { Clock, IdGenerator } from "../runtime/Clock";
@@ -36,7 +37,7 @@ export interface McpStackDeps {
 }
 
 export function createMcpStack(deps: McpStackDeps): McpStack {
-  const fetchImpl = deps.fetchImpl ?? fetch;
+  const fetchImpl = deps.fetchImpl ?? globalFetch;
   const catalog = new ToolCatalog({ now: () => deps.clock.now(), newId: () => deps.ids.next() });
   const broker = new CredentialBroker({ store: deps.store });
   const sessions = new McpSessionManager(new StreamableHttpTransportFactory(fetchImpl), broker, deps.store);

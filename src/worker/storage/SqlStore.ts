@@ -2,7 +2,7 @@
 // `transaction` uses a synchronous SQLite transaction; its callback must not
 // return a promise.
 
-import type { ConversationId, OwnerSnapshot } from "../../shared/domain";
+import type { ConfigurationStatusView, ConversationId, OwnerSnapshot } from "../../shared/domain";
 import type { ViewChange } from "../../shared/wire";
 import { parseJson } from "./Sql";
 import type { StorageBackend } from "./Sql";
@@ -63,6 +63,47 @@ export interface Commit<T> {
   value: T;
   revision: number;
   changes: ViewChange[];
+}
+
+
+/**
+ * The owner-visible configuration projection. Extracted so that configuration
+ * commands and connector connects can publish a live `configuration.update`
+ * frame instead of waiting for the next full snapshot.
+ */
+export function buildConfiguration(tx: StoreTransaction): ConfigurationStatusView {
+  const settings = tx.settings.read();
+  const modelProfile = parseJson<ModelProfile | undefined>(settings.modelProfileJson, undefined);
+  const connectors = tx.mcpServers.list().map((record) => ({
+    id: record.id,
+    name: record.name,
+    endpoint: record.endpoint,
+    authMode: record.authenticationMode,
+    role: record.role,
+    state: record.state,
+    version: record.configurationVersion,
+    toolCount: tx.mcpTools.listLatest(record.id).length,
+    lastError: record.lastError,
+  }));
+  const skills = tx.skills.list().map((record) => ({
+    id: record.id,
+    name: record.name,
+    description: record.description,
+    enabled: record.enabled,
+    deleted: record.deleted,
+    currentVersion: record.currentVersion,
+    createdAt: record.createdAt,
+    updatedAt: record.updatedAt,
+  }));
+  const configuration: ConfigurationStatusView = {
+    connectors,
+    skills,
+    settingsVersion: settings.settingsVersion,
+    missing: [],
+  };
+  if (modelProfile) configuration.model = modelProfile;
+  if (settings.workspaceRoot) configuration.workspaceRoot = settings.workspaceRoot;
+  return configuration;
 }
 
 export class SqlStore {
@@ -147,42 +188,11 @@ export function buildSnapshot(tx: StoreTransaction, conversationId?: Conversatio
     return summary;
   });
 
-  const settings = tx.settings.read();
-  const modelProfile = parseJson<ModelProfile | undefined>(settings.modelProfileJson, undefined);
-  const connectors = tx.mcpServers.list().map((record) => ({
-    id: record.id,
-    name: record.name,
-    endpoint: record.endpoint,
-    authMode: record.authenticationMode,
-    role: record.role,
-    state: record.state,
-    version: record.configurationVersion,
-    toolCount: tx.mcpTools.listLatest(record.id).length,
-    lastError: record.lastError,
-  }));
-  const skills = tx.skills.list().map((record) => ({
-    id: record.id,
-    name: record.name,
-    description: record.description,
-    enabled: record.enabled,
-    deleted: record.deleted,
-    currentVersion: record.currentVersion,
-    createdAt: record.createdAt,
-    updatedAt: record.updatedAt,
-  }));
-
   const snapshot: OwnerSnapshot = {
     revision,
     conversations,
-    configuration: {
-      connectors,
-      skills,
-      settingsVersion: settings.settingsVersion,
-      missing: [],
-    },
+    configuration: buildConfiguration(tx),
   };
-  if (modelProfile) snapshot.configuration.model = modelProfile;
-  if (settings.workspaceRoot) snapshot.configuration.workspaceRoot = settings.workspaceRoot;
 
   if (conversationId) {
     const conversation = tx.conversations.get(conversationId);

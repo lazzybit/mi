@@ -1,3 +1,8 @@
+// The Solid SSR transform appends `export const $$moduleUrl = ...` to every
+// module it transforms. Workerd rejects a non-function named export on the
+// Worker entry, so the marker string `$$moduleUrl` is kept in this comment:
+// the transform skips any module that already mentions it, and this entry does
+// not use `lazy()` (the only consumer of that export).
 import { handleRequest } from "virtual:solid-ssr-handler";
 import { AppError, ownerKey } from "../shared/domain";
 import { verifyAccess } from "./auth/verifyRequest";

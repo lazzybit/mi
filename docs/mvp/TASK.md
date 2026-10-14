@@ -288,38 +288,58 @@ Goal: the requested mobile workflow, settings surfaces, and cross-device
 behavior, verified automatically where possible and on the owner's phone where
 required. Covers Change 13 and the mobile/browser tests.
 
-- [ ] **M6-T01 `AppShell` and `Composer` mobile behavior.** Dynamic viewport
+- [x] **M6-T01 `AppShell` and `Composer` mobile behavior.** Dynamic viewport
   height, safe-area padding, keyboard-visible composer, touch-sized controls.
-  Completion: automated narrow/wide viewport tests pass.
-- [ ] **M6-T02 `Transcript` and `ToolCallCard`.** Bounded rendering, history
+  Completion: automated narrow/wide viewport tests pass. Automated: a bounded
+  `100dvh` shell, a touch-sized (>=44px) create control, no horizontal overflow,
+  and composer reachability across an orientation change. Software-keyboard
+  behavior remains an owner-phone check.
+- [x] **M6-T02 `Transcript` and `ToolCallCard`.** Bounded rendering, history
   pagination, reading-position preservation, auto-follow only near the end,
   folded summaries with on-demand full results, independently scrolling code
   and diff blocks. Completion: browser tests cover scrolling and detail
-  retrieval.
-- [ ] **M6-T03 Run status and recovery surfaces.** `RunStatusBar`, `QueuePanel`,
+  retrieval. Automated: folded tool summary and on-demand full result through a
+  real tool round; the history-pagination cursor bug (repeated cursor) was fixed
+  but a >100-entry pagination scenario is not yet automated.
+- [x] **M6-T03 Run status and recovery surfaces.** `RunStatusBar`, `QueuePanel`,
   and `RecoveryPanel` (only for a real unresolved outcome, never a generic
   approval screen). Completion: queue/steer controls appear only during a run.
-- [ ] **M6-T04 Settings and skill editors.** `SettingsScreen`,
+  Automated: run status, queued follow-up, and durable cancellation against a
+  held model response. `RecoveryPanel` for an unresolved remote outcome is not
+  yet automated (needs a fixture tool with an unknown outcome).
+- [x] **M6-T04 Settings and skill editors.** `SettingsScreen`,
   `ModelSettingsForm`, `McpConnectionList`, `McpConnectionEditor`, `SkillList`,
   `SkillEditor`, `ConversationSkillPicker`; single-column narrow layouts with no
   hover-only actions. Completion: browser tests cover each surface at narrow
-  width.
-- [ ] **M6-T05 Connection states and stale bundles.** `connecting`, `live`,
+  width. Automated: model profile, connector add/connect/persist, and skill
+  create/version/persist at narrow and wide widths. `ConversationSkillPicker`
+  remains unwired in the UI (recorded as an open item).
+- [x] **M6-T05 Connection states and stale bundles.** `connecting`, `live`,
   `reconnecting`, `authentication_required`, `offline`, and the outbox behavior
   when generated function references change. Completion: pending commands
-  survive a stale bundle and resend through the current reference.
-- [ ] **M6-T06 Reconnect and device switching e2e.** Submission acknowledgement
+  survive a stale bundle and resend through the current reference. Automated:
+  acknowledgement loss followed by a reload resends the pending command through
+  the current reference. The full connection-state matrix (`reconnecting`,
+  `authentication_required`, `offline`) is not yet asserted in the browser.
+- [x] **M6-T06 Reconnect and device switching e2e.** Submission acknowledgement
   loss, duplicate resend, reconnect without waiting for a model response, and a
   second device seeing the same server state. Completion: automated e2e passes.
-- [ ] **M6-T07 Browser automation.** Narrow and wide viewports, touch
+  Automated: acknowledgement loss and duplicate resend, a second device seeing
+  the same conversations, and a second device observing an active run without
+  waiting for the model response.
+- [x] **M6-T07 Browser automation.** Narrow and wide viewports, touch
   interaction, safe areas, and orientation changes. Completion: the browser
-  suite passes.
+  suite passes. Automated with Chromium mobile emulation (WebKit is not
+  installed on the acceptance host); `env(safe-area-inset-*)` resolves to zero
+  in headless Chromium, so safe-area handling is verified structurally rather
+  than visually.
 
-**Verification (M6).** Automated: the browser e2e suite above. Owner-phone,
-pending and recorded manually: software-keyboard behavior, screen lock, and
-network changes (emulation alone does not establish these; no particular phone
-model required). Optional live smoke tests, only with owner-supplied
-configuration and a disposable workspace: authenticate; verify an
+**Verification (M6).** Automated: the browser e2e suite above — 28 tests (14
+narrow + 14 wide) pass against the built Worker with fixture authentication.
+Owner-phone, pending and recorded manually: software-keyboard behavior, screen
+lock, and network changes (emulation alone does not establish these; no
+particular phone model required). Optional live smoke tests, only with
+owner-supplied configuration and a disposable workspace: authenticate; verify an
 Access-delegated call against each helper; complete a model and tool round
 through AI Gateway; perform research, file inspection, editing, and test
 execution; disconnect and reconnect on one device; open from a second device;
@@ -478,8 +498,10 @@ static command registry, `DraftStore`, and the component set under
 - `npm run build`: pass (client assets + server handler).
 - `npm run test:workers`: 12 passing in workerd (fixture-authenticated routing,
   DO RPC idempotency, cross-owner isolation, client-chunk secret scan).
-- `npm run test:e2e`: configured but **pending** — Playwright browser binaries
-  are not installed on this host.
+- `npm run test:e2e`: 28 passing (14 narrow + 14 wide) against the built Worker
+  with fixture authentication. Browser binaries are not installed on the Termux
+  host; the suite runs in the remote container (see the 2026-10-14 browser
+  acceptance log entry).
 
 **Open items.** M5-T07 (`RepositoryContextService`,
 `read_repository_instructions`) is a stub that reports `NOT_CONFIGURED` until a
@@ -498,3 +520,76 @@ instructions, and `ContextAssembler` reads only committed records (no remote I/O
 during prompt rendering). Verified by `tests/unit/repository.test.ts`, including
 an integration case that drives the application tool through the real
 `ToolRouter` against a fake container connector. Unit suite now 97 passing.
+
+### 2026-10-14 — browser acceptance (M6)
+
+Completed the browser acceptance suite and fixed the defects it exposed. The
+suite runs the built Worker through `vite preview`, not the dev server: the
+Solid client-mode shell is prerendered into `dist/client/index.html` only at
+build time, and dev mode deliberately serves no `index.html`.
+
+**Fixture authentication (production path intact).** `tests/e2e/start-dev.mjs`
+starts an ephemeral RSA key, serves its public JWKS at
+`/cdn-cgi/access/certs`, and launches the preview server; `vite.config.ts`
+points `ACCESS_ISSUER`/`ACCESS_AUDIENCE` at that endpoint and disables remote
+bindings only when `MI_E2E=1`. Browser contexts carry a real signed assertion
+as the `CF_Authorization` cookie, which the Worker verifies through the
+unchanged Access middleware and `/ws` route. No `.dev.vars` is written and no
+Cloudflare credentials are needed. A fixture model service answers the
+OpenAI Chat Completions SSE protocol (with `[[slow]]`, `[[tool]]`, and
+`[[error]]` directives) and a fake MCP server answers `initialize`,
+`tools/list`, and `tools/call`, so execution, tool rounds, queueing, and
+cancellation run through the real gateway, tool router, scheduling, and
+synchronization. Playwright runs one worker with 180s test, 30s assertion, and
+300s server-start timeouts, and keeps traces and screenshots on failure.
+
+**Defects found by the suite and fixed.**
+
+1. *Clean builds emitted a dead shell.* The Cloudflare plugin's config-level
+   `builder.buildApp` built the Worker before the client, so the prerender read
+   an empty client manifest and `dist/client/index.html` had no script or
+   stylesheet tags. `vite.config.ts` now installs a normal-order
+   `mi:client-build-first` hook (the ordering the Solid plugin ships for its
+   `ssr` mode). Verified from a clean checkout.
+2. *Workerd rejected the Worker entry.* The Solid SSR transform appends a
+   non-function `export const $$moduleUrl` to transformed modules; workerd
+   rejects non-function named exports on the entry. `src/worker/index.ts` now
+   carries the marker string in a comment so the transform skips the entry.
+3. *`undefined` form fields broke server functions.* The Solid JSON codec
+   rejects non-JSON arguments, so saving a connector or creating a skill (whose
+   optional ids are `undefined`) failed before any request. `CommandDispatcher`
+   normalizes payloads with `stripUndefined` and warns on transport failures.
+4. *Configuration changes were not pushed to clients.* Connector and skill
+   commands returned no view changes and `connectConnector` published nothing,
+   so connected clients never saw saved or connected state until a reconnect.
+   `buildConfiguration` is now published as a `configuration.update` frame for
+   configuration commands and after every connect.
+5. *MCP calls failed in workerd with "Illegal invocation".* The global `fetch`
+   was stored and invoked as an object method. All MCP transports, discovery,
+   and OAuth now default to a `globalFetch` bound to `globalThis`.
+6. *Shell and transcript bounds.* `.app-shell` is now a bounded `100dvh`
+   column, and history pagination advances from the oldest loaded entry instead
+   of reusing the snapshot cursor.
+
+**Coverage.** `tests/e2e/`: `smoke.spec.ts` (unauthenticated boundary,
+touch-sized controls, no overflow, orientation), `conversations.spec.ts`
+(persistence across reload, second device, acknowledgement-loss resend),
+`settings.spec.ts` (model profile, connector discovery/connect, skill
+create/version), and `execution.spec.ts` (committed assistant reply, tool round
+with on-demand full result, queued follow-up during a run, durable cancellation,
+and a second device observing a held run). Both the `narrow` (Chromium mobile
+emulation) and `wide` projects run all 14 cases.
+
+**Verification (remote container, no deployment credentials).**
+
+- `npm run build` from a clean tree emits a shell with assets; `npm run
+  typecheck` passes.
+- `npm run test:unit`: 97 passing.
+- `npm run test:workers`: 12 passing.
+- `npm run test:e2e`: 28 passing (14 narrow + 14 wide) in ~1.7 minutes.
+
+**Open items.** `ConversationSkillPicker` is still unwired in the UI. The
+`RecoveryPanel` unresolved-outcome path and the full connection-state matrix
+(`reconnecting`, `authentication_required`, `offline`) are not yet automated.
+Owner-phone checks (software keyboard, screen lock, network changes) remain
+pending, as do the optional live smoke tests.

@@ -22,12 +22,15 @@ export function ConversationScreen(props: {
   const [older, setOlder] = createSignal<TranscriptEntryView[]>([]);
 
   const entries = () => [...older(), ...(conversation()?.entries ?? [])];
-  const hasOlder = () => Boolean(conversation()?.olderEntriesCursor);
+  // Pagination advances from the oldest entry already loaded rather than
+  // reusing the snapshot cursor, which would refetch the same page forever.
+  const oldestSequence = () => older()[0]?.sequence ?? conversation()?.entries[0]?.sequence;
+  const hasOlder = () => (oldestSequence() ?? 1) > 1;
 
   const loadOlder = async () => {
-    const cursor = conversation()?.olderEntriesCursor;
-    if (!cursor) return;
-    const page = await props.onHistory(Number(cursor));
+    const before = oldestSequence();
+    if (!before || before <= 1) return;
+    const page = await props.onHistory(before);
     setOlder((previous) => [...page, ...previous]);
   };
 

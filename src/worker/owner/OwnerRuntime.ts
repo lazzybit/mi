@@ -26,7 +26,7 @@ import type {
 import type { Commit, SqlStore, StoreTransaction } from "../storage/SqlStore";
 import type { StorageBackend } from "../storage/Sql";
 import type { SqlExecutor } from "../storage/Sql";
-import { SqlStore as SqlStoreClass } from "../storage/SqlStore";
+import { SqlStore as SqlStoreClass, buildConfiguration } from "../storage/SqlStore";
 import { projectEntry } from "../storage/projections";
 import { ConversationService, RunControlService, SubmissionService, type ServiceOutcome } from "../conversations/services";
 import { SettingsService } from "../settings/SettingsService";
@@ -49,6 +49,19 @@ import { DEFAULT_RUNTIME_LIMITS, type RuntimeLimits } from "../runtime/limits";
 import { cryptoIdGenerator, systemClock, type Clock, type IdGenerator } from "../runtime/Clock";
 import { CommandProcessor } from "../rpc/CommandProcessor";
 import { SyncHub, type SyncSocket } from "../sync/SyncHub";
+
+/** Commands whose result must be pushed to connected clients as a live
+ * `configuration.update` frame. */
+const CONFIGURATION_COMMANDS = new Set([
+  "settings.save_model_profile",
+  "connector.save",
+  "connector.set_enabled",
+  "skill.create",
+  "skill.update",
+  "skill.disable",
+  "skill.remove",
+  "skill.select_for_conversation",
+]);
 
 export interface OwnerRuntimeDeps {
   backend: StorageBackend;
@@ -319,7 +332,22 @@ export class OwnerRuntime {
     if (!envelope || typeof envelope.commandId !== "string" || envelope.commandId.length === 0) {
       throw new AppError("INVALID_INPUT", "a command envelope with a commandId is required");
     }
-    return this.processor.process(kind, envelope, handler);
+    return this.processor.process(kind, envelope, (tx, payload) => {
+      const outcome = handler(tx, payload);
+      if (CONFIGURATION_COMMANDS.has(kind)) {
+        outcome.changes.push({ kind: "configuration.update", value: buildConfiguration(tx) });
+      }
+      return outcome;
+    });
+  }
+
+  /** Push the current configuration to connected clients. */
+  private publishConfiguration(): void {
+    const commit = this.store.transaction((tx) => {
+      tx.changes.push({ kind: "configuration.update", value: buildConfiguration(tx) });
+      return null;
+    });
+    this.sync.publish(commit);
   }
 
   history(query: { conversationId: ConversationId; beforeSequence?: number; limit?: number }) {
@@ -397,6 +425,9 @@ export class OwnerRuntime {
       const message = error instanceof Error ? error.message : "connection failed";
       this.store.transaction((tx) => tx.mcpServers.setState(connectorId, "error", message, this.clock.now()));
       return { connectorId, state: "error", toolCount: 0, error: message };
+    } finally {
+      // Connector state and tool counts are part of the configuration view.
+      this.publishConfiguration();
     }
   }
 

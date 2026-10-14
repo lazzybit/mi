@@ -73,3 +73,23 @@ export function normalizeResourcePath(path: string): string {
 export function isJsonObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
+
+/**
+ * Remove `undefined` properties so a payload survives the JSON transport used
+ * by server functions. Solid rejects arguments that JSON cannot represent, and
+ * optional form fields are commonly `undefined` rather than absent.
+ */
+export function stripUndefined<T>(value: T): T {
+  if (Array.isArray(value)) {
+    return value.map((item) => stripUndefined(item)) as unknown as T;
+  }
+  if (value !== null && typeof value === "object") {
+    const out: Record<string, unknown> = {};
+    for (const [key, item] of Object.entries(value as Record<string, unknown>)) {
+      if (item === undefined) continue;
+      out[key] = stripUndefined(item);
+    }
+    return out as T;
+  }
+  return value;
+}

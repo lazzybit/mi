@@ -9,6 +9,8 @@ dist/
 coverage/
 playwright-report/
 test-results/
+.e2e-state/
+tests/e2e/.state/
 worker-configuration.d.ts
 solid-env.d.ts
 *.local

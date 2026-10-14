@@ -3,6 +3,7 @@
 // a stale-bundle failure (PLAN.md -> Client -> CommandDispatcher).
 
 import { AppError, type CommandEnvelope, type CommandReceipt } from "../../shared/domain";
+import { stripUndefined } from "../../shared/json";
 import { CommandOutbox, OUTBOX_SCHEMA_VERSION, type PendingCommand } from "./CommandOutbox";
 
 export type CommandHandler = (command: CommandEnvelope<unknown>) => Promise<CommandReceipt<unknown>>;
@@ -23,7 +24,7 @@ export class CommandDispatcher {
     return {
       commandId: crypto.randomUUID(),
       kind,
-      payload,
+      payload: stripUndefined(payload),
       schemaVersion: OUTBOX_SCHEMA_VERSION,
       createdAt: Date.now(),
       state: "local_pending",
@@ -42,6 +43,9 @@ export class CommandDispatcher {
       return { status: "accepted", receipt };
     } catch (error) {
       const appError = toAppError(error);
+      // Surface transport and serialization failures that would otherwise be
+      // swallowed; application rejections are handled below.
+      if (!appError) console.warn("mi: command transport failure", command.kind, error);
       // Definitive application rejections are terminal; transport failures and
       // stale-bundle reference errors keep the command pending for resend.
       if (appError && appError.code !== "UNAUTHENTICATED" && appError.code !== "CONFLICT") {
