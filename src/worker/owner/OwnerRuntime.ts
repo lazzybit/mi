@@ -231,6 +231,17 @@ export class OwnerRuntime {
     return this.store.read((tx) => tx.attempts.listByState(["dispatched"]).length > 0);
   }
 
+  /** Diagnostic for the acceptance suite; lists unsettled attempt states. */
+  unsettledAttempts(): { state: string; toolName?: string; generation: number }[] {
+    return this.store.read((tx) =>
+      tx.attempts.listByState(["prepared", "dispatched", "unknown"]).map((attempt) => ({
+        state: attempt.state,
+        toolName: attempt.toolName,
+        generation: attempt.generation,
+      })),
+    );
+  }
+
   async dispatch(method: string, args: unknown[]): Promise<unknown> {
     switch (method) {
       case "createConversation":

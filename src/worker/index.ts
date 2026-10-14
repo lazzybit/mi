@@ -40,7 +40,7 @@ async function route(request: Request, env: Env): Promise<Response> {
   if (
     url.pathname === "/api/mcp/oauth/callback" ||
     url.pathname === "/ws" ||
-    url.pathname === "/__fixture/evict"
+    url.pathname.startsWith("/__fixture/")
   ) {
     return ownerRoute(request, env);
   }
