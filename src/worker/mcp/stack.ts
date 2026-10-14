@@ -1,8 +1,10 @@
 // The MCP subsystem wiring (PLAN.md -> Components -> `src/worker/mcp/`).
 
+import { AppError } from "../../shared/domain";
 import type { SqlStore } from "../storage/SqlStore";
 import type { Clock, IdGenerator } from "../runtime/Clock";
 import { ToolPolicyRegistry } from "../runtime/ToolPolicy";
+import { RepositoryContextService } from "../context/RepositoryContextService";
 import { SkillTools } from "../skills/SkillTools";
 import { AuthDiscovery } from "./AuthDiscovery";
 import { CredentialBroker } from "./CredentialBroker";
@@ -20,6 +22,7 @@ export interface McpStack {
   sessions: McpSessionManager;
   discovery: AuthDiscovery;
   oauth: OAuthCoordinator;
+  repository: RepositoryContextService;
   router: ToolRouter;
 }
 
@@ -47,6 +50,13 @@ export function createMcpStack(deps: McpStackDeps): McpStack {
     callbackUrl: deps.callbackUrl,
     fetchImpl,
   });
+  const repository = new RepositoryContextService({
+    store: deps.store,
+    clock: deps.clock,
+    ids: deps.ids,
+    workspaceRoot: () => deps.store.read((tx) => tx.settings.read().workspaceRoot),
+    readFile: (path) => readContainerFile(deps.store, sessions, deps.ids, path),
+  });
   const router = new ToolRouter({
     store: deps.store,
     catalog,
@@ -54,9 +64,9 @@ export function createMcpStack(deps: McpStackDeps): McpStack {
     broker,
     policy: new ToolPolicyRegistry(),
     validator: new JsonSchemaValidator(),
-    application: new SkillTools(deps.store),
+    application: new SkillTools(deps.store, repository),
   });
-  return { catalog, broker, sessions, discovery, oauth, router };
+  return { catalog, broker, sessions, discovery, oauth, repository, router };
 }
 
 export async function listAllTools(connection: McpConnection): Promise<DiscoveredTool[]> {
@@ -69,4 +79,31 @@ export async function listAllTools(connection: McpConnection): Promise<Discovere
     if (!cursor) break;
   }
   return tools;
+}
+
+/** A recorded instruction read through the configured container connector. */
+async function readContainerFile(
+  store: SqlStore,
+  sessions: McpSessionManager,
+  ids: IdGenerator,
+  path: string,
+): Promise<string> {
+  const connector = store.read((tx) =>
+    tx.mcpServers.list().find((server) => server.role === "container" && server.enabled && server.state === "ready"),
+  );
+  if (!connector) {
+    throw new AppError("NOT_CONFIGURED", "no container connector is configured");
+  }
+  const session = await sessions.acquire(connector.id);
+  const result = await session.connection.callTool(
+    { requestId: ids.next("read"), name: "read", arguments: { path } },
+    new AbortController().signal,
+  );
+  if (result.isError) {
+    throw new AppError("NOT_FOUND", `unable to read ${path} from the container`);
+  }
+  return result.content
+    .filter((item) => item.type === "text")
+    .map((item) => (item.type === "text" ? item.text : ""))
+    .join("\n");
 }

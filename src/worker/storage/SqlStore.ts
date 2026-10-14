@@ -20,6 +20,7 @@ import {
   McpToolRepository,
   OAuthTransactionRepository,
   OwnerStateRepository,
+  RepositoryInstructionRepository,
   RunRepository,
   SettingsRepository,
   SkillRepository,
@@ -53,6 +54,7 @@ export interface StoreTransaction {
   readonly skills: SkillRepository;
   readonly contextSnapshots: ContextSnapshotRepository;
   readonly attemptResolutions: AttemptResolutionRepository;
+  readonly repositoryInstructions: RepositoryInstructionRepository;
   /** View changes emitted during this transaction. */
   readonly changes: ViewChange[];
 }
@@ -124,6 +126,7 @@ export class SqlStore {
       skills: new SkillRepository(sql),
       contextSnapshots: new ContextSnapshotRepository(sql),
       attemptResolutions: new AttemptResolutionRepository(sql),
+      repositoryInstructions: new RepositoryInstructionRepository(sql),
       changes: [],
     };
   }

@@ -263,6 +263,19 @@ export interface AttemptResolutionRecord {
   createdAt: number;
 }
 
+/** A committed repository instruction fetched through the container connector. */
+export interface RepositoryInstructionRecord {
+  id: string;
+  workspaceRoot: string;
+  path: string;
+  directory: string;
+  artifactId: ArtifactId;
+  digest: string;
+  /** False records a confirmed absence so a missing file is not refetched. */
+  present: boolean;
+  fetchedAt: number;
+}
+
 export interface StoredModelProfile extends ModelProfile {
   protocol: ModelProtocol;
 }

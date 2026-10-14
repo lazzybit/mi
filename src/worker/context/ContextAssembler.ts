@@ -143,6 +143,21 @@ export class ContextAssembler {
     const settings = tx.settings.read();
     if (settings.workspaceRoot) {
       sections.push({ id: "workspace", text: `Workspace root: ${settings.workspaceRoot}` });
+      // Repository instructions are read only from committed records; no remote
+      // I/O happens during prompt rendering.
+      const instructions = tx.repositoryInstructions.list(settings.workspaceRoot).filter((record) => record.present);
+      if (instructions.length > 0) {
+        const text = instructions
+          .map((record) => {
+            const content = tx.artifacts
+              .readChunks(record.artifactId)
+              .map((chunk) => chunk.data)
+              .join("");
+            return `# ${record.path}\n${content}`;
+          })
+          .join("\n\n");
+        sections.push({ id: "repository", text: `Repository instructions:\n${text}` });
+      }
     }
     const selected = this.resolveSelectedSkills(tx, conversationId);
     if (selected.length > 0) {

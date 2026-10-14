@@ -28,6 +28,7 @@ import type {
   McpToolRecord,
   OAuthTransactionRecord,
   OwnerStateRecord,
+  RepositoryInstructionRecord,
   RunCheckpoint,
   RunRecord,
   SkillRecord,
@@ -1522,3 +1523,74 @@ export class AttemptResolutionRepository {
 }
 
 export type { SqlValue };
+
+export class RepositoryInstructionRepository {
+  constructor(private readonly sql: SqlExecutor) {}
+
+  upsert(record: RepositoryInstructionRecord): void {
+    run(
+      this.sql,
+      `INSERT INTO repository_instructions (id, workspace_root, path, directory, artifact_id, digest, present, fetched_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT (workspace_root, path) DO UPDATE SET
+         artifact_id = excluded.artifact_id,
+         digest = excluded.digest,
+         present = excluded.present,
+         fetched_at = excluded.fetched_at`,
+      record.id,
+      record.workspaceRoot,
+      record.path,
+      record.directory,
+      record.artifactId,
+      record.digest,
+      boolToInt(record.present),
+      record.fetchedAt,
+    );
+  }
+
+  get(workspaceRoot: string, path: string): RepositoryInstructionRecord | undefined {
+    return mapRepositoryInstruction(
+      first<RepositoryInstructionRow>(
+        this.sql,
+        `SELECT * FROM repository_instructions WHERE workspace_root = ? AND path = ?`,
+        workspaceRoot,
+        path,
+      ),
+    );
+  }
+
+  list(workspaceRoot: string): RepositoryInstructionRecord[] {
+    return all<RepositoryInstructionRow>(
+      this.sql,
+      `SELECT * FROM repository_instructions WHERE workspace_root = ? ORDER BY path ASC`,
+      workspaceRoot,
+    ).map((row) => mapRepositoryInstruction(row) as RepositoryInstructionRecord);
+  }
+}
+
+interface RepositoryInstructionRow {
+  id: string;
+  workspace_root: string;
+  path: string;
+  directory: string;
+  artifact_id: string;
+  digest: string;
+  present: number;
+  fetched_at: number;
+}
+
+function mapRepositoryInstruction(
+  row: RepositoryInstructionRow | undefined,
+): RepositoryInstructionRecord | undefined {
+  if (!row) return undefined;
+  return {
+    id: row.id,
+    workspaceRoot: row.workspace_root,
+    path: row.path,
+    directory: row.directory,
+    artifactId: row.artifact_id,
+    digest: row.digest,
+    present: intToBool(row.present),
+    fetchedAt: Number(row.fetched_at),
+  };
+}

@@ -247,4 +247,16 @@ export const SCHEMA_STATEMENTS: readonly string[] = [
      evidence_json TEXT NOT NULL,
      created_at INTEGER NOT NULL
    )`,
+
+  `CREATE TABLE IF NOT EXISTS repository_instructions (
+     id TEXT PRIMARY KEY,
+     workspace_root TEXT NOT NULL,
+     path TEXT NOT NULL,
+     directory TEXT NOT NULL,
+     artifact_id TEXT NOT NULL,
+     digest TEXT NOT NULL,
+     present INTEGER NOT NULL DEFAULT 1,
+     fetched_at INTEGER NOT NULL,
+     UNIQUE (workspace_root, path)
+   )`,
 ];

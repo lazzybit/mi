@@ -7,11 +7,15 @@ import { normalizeResourcePath } from "../../shared/json";
 import type { SqlStore } from "../storage/SqlStore";
 import type { ApplicationToolHandler } from "../mcp/ToolRouter";
 import type { ToolExecutionOutcome, ToolInvocation } from "../mcp/types";
+import type { RepositoryContextService } from "../context/RepositoryContextService";
 
 const APPLICATION_PREFIX = "app__";
 
 export class SkillTools implements ApplicationToolHandler {
-  constructor(private readonly store: SqlStore) {}
+  constructor(
+    private readonly store: SqlStore,
+    private readonly repository?: RepositoryContextService,
+  ) {}
 
   handles(alias: string): boolean {
     return alias.startsWith(APPLICATION_PREFIX);
@@ -68,12 +72,19 @@ export class SkillTools implements ApplicationToolHandler {
     return textResult(text);
   }
 
-  private readRepositoryInstructions(input: Record<string, unknown>): ToolExecutionOutcome {
-    void input;
-    // Repository instructions are fetched through the configured container
-    // connector; when no workspace is configured this is an explicit failure
-    // rather than a silent empty result.
-    throw new AppError("NOT_CONFIGURED", "no repository workspace is configured");
+  private async readRepositoryInstructions(input: Record<string, unknown>): Promise<ToolExecutionOutcome> {
+    if (!this.repository) {
+      throw new AppError("NOT_CONFIGURED", "repository instructions are not configured");
+    }
+    const path = requireString(input, "path");
+    const instructions = await this.repository.loadForPath(path);
+    if (instructions.length === 0) {
+      return textResult(`No repository instructions apply to ${path}.`);
+    }
+    const text = instructions
+      .map((instruction) => `# ${instruction.path}\n${instruction.content}`)
+      .join("\n\n");
+    return textResult(text);
   }
 }
 

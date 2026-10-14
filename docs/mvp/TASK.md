@@ -268,7 +268,7 @@ tests.
   explicit source range and digest; never compact unresolved tool rounds or
   split a call from its result. Completion: compaction preserves source history
   and unresolved outcomes and never converts uncertainty into success.
-- [ ] **M5-T07 Repository and bounded-result tools.**
+- [x] **M5-T07 Repository and bounded-result tools.**
   `RepositoryContextService`, `read_repository_instructions`, and
   `read_tool_result`. Completion: context assembly reads committed instruction
   records and hides no remote I/O inside prompt rendering.
@@ -485,3 +485,16 @@ static command registry, `DraftStore`, and the component set under
 `read_repository_instructions`) is a stub that reports `NOT_CONFIGURED` until a
 workspace is configured. M6 browser automation and the owner-phone checks remain
 pending. Live smoke tests require owner-supplied configuration.
+
+### 2026-10-14 — M5-T07 repository instructions
+
+Completed `RepositoryContextService` and the repository-instruction path. A new
+`repository_instructions` table records both present files (with an artifact
+reference and digest) and confirmed absences, so a missing instruction file is
+not refetched on every load. Fetching goes through the configured container
+connector (role `container`) via the recorded `read` call;
+`read_repository_instructions({ path })` loads the applicable nested
+instructions, and `ContextAssembler` reads only committed records (no remote I/O
+during prompt rendering). Verified by `tests/unit/repository.test.ts`, including
+an integration case that drives the application tool through the real
+`ToolRouter` against a fake container connector. Unit suite now 97 passing.
