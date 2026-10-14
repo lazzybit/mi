@@ -13,7 +13,7 @@ describe("SqlStore", () => {
   it("migrates from empty storage and records the schema version", () => {
     const { store } = newStore();
     const revision = store.read((tx) => tx.ownerState.read());
-    expect(revision.schemaVersion).toBe(1);
+    expect(revision.schemaVersion).toBe(2);
     expect(revision.revision).toBe(0);
   });
 
@@ -96,6 +96,7 @@ describe("SqlStore", () => {
         payloadHash: "hash-a",
         resultJson: JSON.stringify({ conversationId: "c1" }),
         revision: 1,
+        outcome: "accepted",
         createdAt: 1000,
       }),
     );
@@ -110,6 +111,7 @@ describe("SqlStore", () => {
           payloadHash: "hash-b",
           resultJson: "{}",
           revision: 2,
+          outcome: "accepted",
           createdAt: 1001,
         }),
       ),

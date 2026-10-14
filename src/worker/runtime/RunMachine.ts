@@ -1,13 +1,13 @@
 // Pure run transition function (PLAN.md -> Execution engine). Performs no I/O
 // and writes no SQL; the driver coordinates effects.
 
-import type { AttemptId, ArtifactId, ConnectorId, RunState } from "../../shared/domain";
+import type { AttemptId, ConnectorId, RunState } from "../../shared/domain";
 import type { PersistedToolCall, RunCheckpoint, RunRecord } from "../storage/records";
 
 export type RuntimeEvent =
   | { type: "start"; contextSnapshotId?: string }
   | { type: "context_ready"; snapshotId: string }
-  | { type: "compaction_required"; requestArtifactId: ArtifactId }
+  | { type: "compaction_required" }
   | { type: "model_finished"; entryId: string; tools: PersistedToolCall[] }
   | { type: "tool_finished"; attemptId: AttemptId }
   | { type: "authentication_required"; connectorId: ConnectorId }
@@ -17,7 +17,7 @@ export type RuntimeEvent =
 
 export type RuntimeEffect =
   | { type: "assemble_context" }
-  | { type: "compact_context"; requestArtifactId: ArtifactId }
+  | { type: "compact_context" }
   | { type: "request_model" }
   | { type: "execute_tools" }
   | { type: "finish" }
@@ -77,7 +77,7 @@ export class RunMachine {
         return {
           nextState: "running",
           nextCheckpoint: checkpoint,
-          effects: [{ type: "compact_context", requestArtifactId: event.requestArtifactId }],
+          effects: [{ type: "compact_context" }],
         };
       }
 

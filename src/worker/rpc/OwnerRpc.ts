@@ -22,6 +22,7 @@ import type {
 import type {
   CreateConversationInput,
   CreateSkillInput,
+  DeleteConversationInput,
   RenameConversationInput,
   SaveConnectorInput,
   SaveModelProfileInput,
@@ -36,6 +37,7 @@ import type { ConnectionReport } from "../mcp/types";
 export interface OwnerRpc {
   createConversation(command: CommandEnvelope<CreateConversationInput>): Promise<CommandReceipt<{ conversationId: ConversationId }>>;
   renameConversation(command: CommandEnvelope<RenameConversationInput>): Promise<CommandReceipt<void>>;
+  deleteConversation(command: CommandEnvelope<DeleteConversationInput>): Promise<CommandReceipt<void>>;
   submit(command: CommandEnvelope<SubmitInput>): Promise<CommandReceipt<SubmitResult>>;
   withdrawSubmission(command: CommandEnvelope<WithdrawSubmissionInput>): Promise<CommandReceipt<void>>;
   cancelRun(command: CommandEnvelope<{ runId: RunId }>): Promise<CommandReceipt<void>>;
@@ -65,6 +67,9 @@ export abstract class OwnerRpcBase implements OwnerRpc {
   }
   renameConversation(command: CommandEnvelope<RenameConversationInput>) {
     return this.call<CommandReceipt<void>>("renameConversation", [command]);
+  }
+  deleteConversation(command: CommandEnvelope<DeleteConversationInput>) {
+    return this.call<CommandReceipt<void>>("deleteConversation", [command]);
   }
   submit(command: CommandEnvelope<SubmitInput>) {
     return this.call<CommandReceipt<SubmitResult>>("submit", [command]);

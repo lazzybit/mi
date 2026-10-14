@@ -1,7 +1,7 @@
 # Plan-0001: Add inline rename and permanent delete to conversations
 
 - Created Date: 2026-10-15
-- Status: Draft
+- Status: In Progress
 
 ## Target
 
@@ -29,8 +29,11 @@ accepted in ADR-0001. Complete historical content erasure is not a completion
 claim. The root redesign and historical cleanup are recorded in
 [TODO](../TODO.md).
 
-This PLAN remains Draft. Adoption of the interim approach does not by itself
-authorize implementation of the entire plan.
+The user approved this implementation scope. Execution is in progress.
+
+The earlier documentation-stage restrictions described below are historical.
+They applied only while this PLAN was being prepared and no longer restrict
+the authorized implementation.
 
 ## Start
 
@@ -457,7 +460,8 @@ Add a focused conversation-domain test file where it improves clarity.
 
 ## Verification
 
-For this documentation stage:
+For this documentation stage (historical; completed while the PLAN was being
+prepared):
 
 1. Confirm the ADR is Accepted and this PLAN is Draft.
 2. Inspect the complete documentation diff.
@@ -524,4 +528,4 @@ The user has accepted retention of pre-existing artifacts without verifiable
 ownership. Historical inventory and the root lifecycle redesign are deferred
 in TODO rather than blocking this feature.
 
-This PLAN remains Draft until the user approves its implementation scope.
+The user approved this implementation scope. Execution is in progress.

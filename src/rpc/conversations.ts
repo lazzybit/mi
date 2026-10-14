@@ -1,14 +1,20 @@
 "use server";
 
-import type {
-  CommandEnvelope,
-  CommandReceipt,
-  ConversationId,
-  HistoryPage,
-  HistoryQuery,
-  OwnerSnapshot,
+import {
+  AppError,
+  type CommandEnvelope,
+  type CommandFunctionOutcome,
+  type CommandReceipt,
+  type ConversationId,
+  type HistoryPage,
+  type HistoryQuery,
+  type OwnerSnapshot,
 } from "../shared/domain";
-import type { CreateConversationInput, RenameConversationInput } from "../shared/commands";
+import type {
+  CreateConversationInput,
+  DeleteConversationInput,
+  RenameConversationInput,
+} from "../shared/commands";
 import { requireRpcContext } from "../worker/rpc/RpcContext";
 
 export async function createConversation(
@@ -17,10 +23,31 @@ export async function createConversation(
   return requireRpcContext().ownerStub.createConversation(command);
 }
 
+// ADR-0001: rename and delete return an explicit serializable outcome so a
+// definitive rejection survives the Solid server-function boundary. A
+// non-application failure is rethrown and stays an uncertain outcome.
 export async function renameConversation(
   command: CommandEnvelope<RenameConversationInput>,
-): Promise<CommandReceipt<void>> {
-  return requireRpcContext().ownerStub.renameConversation(command);
+): Promise<CommandFunctionOutcome<void>> {
+  try {
+    const receipt = await requireRpcContext().ownerStub.renameConversation(command);
+    return { ok: true, receipt };
+  } catch (error) {
+    if (error instanceof AppError) return { ok: false, error: error.toApiError() };
+    throw error;
+  }
+}
+
+export async function deleteConversation(
+  command: CommandEnvelope<DeleteConversationInput>,
+): Promise<CommandFunctionOutcome<void>> {
+  try {
+    const receipt = await requireRpcContext().ownerStub.deleteConversation(command);
+    return { ok: true, receipt };
+  } catch (error) {
+    if (error instanceof AppError) return { ok: false, error: error.toApiError() };
+    throw error;
+  }
 }
 
 export async function getSnapshot(conversationId?: ConversationId): Promise<OwnerSnapshot> {

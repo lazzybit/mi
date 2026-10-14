@@ -12,6 +12,7 @@ import {
 import type {
   CreateConversationInput,
   CreateSkillInput,
+  DeleteConversationInput,
   RenameConversationInput,
   ResolveAttemptCommandInput,
   SaveConnectorInput,
@@ -28,7 +29,7 @@ import type { StorageBackend } from "../storage/Sql";
 import type { SqlExecutor } from "../storage/Sql";
 import { SqlStore as SqlStoreClass, buildConfiguration } from "../storage/SqlStore";
 import { projectEntry } from "../storage/projections";
-import { ConversationService, RunControlService, SubmissionService, type ServiceOutcome } from "../conversations/services";
+import { ConversationService, RunControlService, SubmissionService, type ConversationDeletion, type ServiceOutcome } from "../conversations/services";
 import { SettingsService } from "../settings/SettingsService";
 import { SkillRegistry } from "../skills/SkillRegistry";
 import { ConnectorService } from "../mcp/ConnectorService";
@@ -47,7 +48,7 @@ import { TransitionCoordinator } from "../runtime/TransitionCoordinator";
 import { WakeScheduler, type AlarmStore } from "../runtime/WakeScheduler";
 import { DEFAULT_RUNTIME_LIMITS, type RuntimeLimits } from "../runtime/limits";
 import { cryptoIdGenerator, systemClock, type Clock, type IdGenerator } from "../runtime/Clock";
-import { CommandProcessor } from "../rpc/CommandProcessor";
+import { CommandProcessor, type CommandProcessOptions } from "../rpc/CommandProcessor";
 import { SyncHub, type SyncSocket } from "../sync/SyncHub";
 
 /** Commands whose result must be pushed to connected clients as a live
@@ -241,6 +242,8 @@ export class OwnerRuntime {
         return this.command("conversation.rename", args[0] as CommandEnvelope<RenameConversationInput>, (tx, p) =>
           this.conversations.rename(tx, p as RenameConversationInput),
         );
+      case "deleteConversation":
+        return this.deleteConversation(args[0] as CommandEnvelope<DeleteConversationInput>);
       case "submit":
         return this.command("submission.submit", args[0] as CommandEnvelope<SubmitInput>, (tx, p) =>
           this.submissions.submit(tx, p as SubmitInput),
@@ -332,6 +335,7 @@ export class OwnerRuntime {
     kind: string,
     envelope: CommandEnvelope<unknown>,
     handler: (tx: StoreTransaction, payload: unknown) => ServiceOutcome<T>,
+    options: CommandProcessOptions<T> = {},
   ): Promise<CommandReceipt<T>> {
     if (!envelope || typeof envelope.commandId !== "string" || envelope.commandId.length === 0) {
       throw new AppError("INVALID_INPUT", "a command envelope with a commandId is required");
@@ -342,7 +346,32 @@ export class OwnerRuntime {
         outcome.changes.push({ kind: "configuration.update", value: buildConfiguration(tx) });
       }
       return outcome;
-    });
+    }, options);
+  }
+
+  /**
+   * ADR-0001: permanent deletion keeps the public receipt empty while the
+   * internal cleanup result carries the affected runtime ids. Definitive
+   * rejections are persisted so a delayed retry cannot delete later.
+   */
+  private async deleteConversation(
+    envelope: CommandEnvelope<DeleteConversationInput>,
+  ): Promise<CommandReceipt<void>> {
+    const receipt = await this.command<ConversationDeletion>(
+      "conversation.delete",
+      envelope,
+      (tx, payload) => this.conversations.delete(tx, payload as DeleteConversationInput),
+      { persistRejections: true, receiptValue: () => null },
+    );
+    const deletion = receipt.result as ConversationDeletion | null;
+    if (deletion) this.afterConversationDeletion(deletion);
+    return { commandId: receipt.commandId, revision: receipt.revision, result: undefined };
+  }
+
+  /** Discard in-memory execution state for records that no longer exist. */
+  private afterConversationDeletion(deletion: ConversationDeletion): void {
+    for (const attemptId of deletion.attemptIds) this.driver.discardAttempt(attemptId);
+    for (const runId of deletion.runIds) this.driver.discardRun(runId);
   }
 
   /** Push the current configuration to connected clients. */

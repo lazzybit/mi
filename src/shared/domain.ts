@@ -35,6 +35,15 @@ export interface CommandReceipt<T> {
   result: T;
 }
 
+/**
+ * ADR-0001: explicit serializable reply for management server functions. The
+ * Solid server-function boundary may not preserve thrown `AppError`
+ * instances, so the adapter reconstructs one on the client.
+ */
+export type CommandFunctionOutcome<T> =
+  | { ok: true; receipt: CommandReceipt<T> }
+  | { ok: false; error: ApiError };
+
 export type RunState =
   | "queued"
   | "running"

@@ -32,6 +32,13 @@ export class OutputCommitter {
     if (delta) {
       this.buffers.delete(attemptId);
       this.lastFlush.set(attemptId, this.clock.now());
+      // ADR-0001: never write output for an attempt or run that no longer
+      // exists; a deleted conversation must not be recreated by a late flush.
+      const writable = this.store.read((tx) => {
+        const attempt = tx.attempts.get(attemptId);
+        return attempt !== undefined && tx.runs.get(attempt.runId) !== undefined;
+      });
+      if (!writable) return "";
       this.store.transaction((tx) => tx.liveOutput.append(attemptId, delta, this.clock.now()));
       const content = this.current(attemptId);
       this.listener?.(attemptId, content, false);
@@ -58,5 +65,11 @@ export class OutputCommitter {
     this.buffers.delete(attemptId);
     this.lastFlush.delete(attemptId);
     this.store.transaction((tx) => tx.liveOutput.clear(attemptId));
+  }
+
+  /** ADR-0001: drop buffered output without writing it back to storage. */
+  discard(attemptId: string): void {
+    this.buffers.delete(attemptId);
+    this.lastFlush.delete(attemptId);
   }
 }

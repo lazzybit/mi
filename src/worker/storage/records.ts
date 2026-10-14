@@ -29,12 +29,20 @@ export interface OwnerStateRecord {
   driverGeneration: number;
 }
 
+/**
+ * A durable command outcome. `rejected` rows record a definitive refusal so a
+ * delayed retry returns the same rejection instead of running the command
+ * later (ADR-0001). Existing rows without a discriminator are `accepted`.
+ */
+export type CommandOutcome = "accepted" | "rejected";
+
 export interface CommandReceiptRecord {
   commandId: string;
   kind: string;
   payloadHash: string;
   resultJson: string;
   revision: number;
+  outcome: CommandOutcome;
   createdAt: number;
 }
 

@@ -52,7 +52,7 @@ const cases: Case[] = [
   {
     name: "prepare_context + compaction_required",
     run: makeRun({ state: "running", phase: "prepare_context" }),
-    event: { type: "compaction_required", requestArtifactId: "art_1" },
+    event: { type: "compaction_required" },
     expectState: "running",
     expectPhase: "compact_context",
   },

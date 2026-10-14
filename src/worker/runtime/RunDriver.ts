@@ -78,6 +78,10 @@ export class RunDriver {
       const active = tx.runs.activeRuns();
       const running = active.find((run) => run.state === "running");
       if (running) return running;
+      // ADR-0001: a paused run with a persisted cancellation request must be
+      // selectable so cancellation can reach a terminal state.
+      const cancellable = active.find((run) => run.cancelRequestedAt !== undefined);
+      if (cancellable) return cancellable;
       const blocked = active.find(
         (run) => run.state === "waiting_for_auth" || run.state === "needs_attention",
       );
@@ -97,13 +101,18 @@ export class RunDriver {
   private async runLoop(initial: RunRecord, deadline: number): Promise<void> {
     let run = initial;
     for (;;) {
-      run = this.reload(run.id) ?? run;
+      // ADR-0001: a run that no longer exists (for example after deletion)
+      // stops the driver instead of continuing from stale state.
+      const reloaded = this.reload(run.id);
+      if (!reloaded) return;
+      run = reloaded;
       if (run.state === "completed" || run.state === "cancelled" || run.state === "failed") return;
-      if (run.state === "waiting_for_auth" || run.state === "needs_attention") return;
-      if (run.cancelRequestedAt !== undefined && run.phase !== "finish_turn") {
-        run = this.applyTransition(run, { type: "cancel_requested" });
+      // Cancellation is processed before paused work blocks driver selection.
+      if (run.cancelRequestedAt !== undefined) {
+        this.applyTransition(run, { type: "cancel_requested" });
         return;
       }
+      if (run.state === "waiting_for_auth" || run.state === "needs_attention") return;
       if (this.deps.clock.now() >= deadline) return;
 
       let status: StepStatus;
@@ -136,6 +145,7 @@ export class RunDriver {
       .filter((submission) => submission.runId === run.id);
     if (queued.length === 0) return;
     const commit = this.deps.store.transaction((tx) => {
+      if (!this.executionCurrent(tx, run)) return;
       for (const submission of queued) tx.submissions.setState(submission.id, "accepted");
       tx.changes.push({
         kind: "inbox.replace",
@@ -151,6 +161,7 @@ export class RunDriver {
     const steering = this.deps.store.read((tx) => tx.submissions.listSteeringForRun(run.id));
     if (steering.length === 0) return;
     const commit = this.deps.store.transaction((tx) => {
+      if (!this.executionCurrent(tx, run)) return;
       for (const submission of steering) {
         tx.submissions.setState(submission.id, "accepted");
         const entry = this.newEntry(tx, run, "user", submission.content, undefined);
@@ -187,6 +198,9 @@ export class RunDriver {
       updatedAt: this.deps.clock.now(),
     };
     const commit = this.deps.store.transaction((tx) => {
+      // ADR-0001: do not publish a transition for a run that was deleted or
+      // whose generation was superseded.
+      if (!this.executionCurrent(tx, run)) return;
       tx.runs.update(updated);
       mutate?.(tx, transition);
       tx.changes.push({
@@ -209,10 +223,7 @@ export class RunDriver {
       this.applyTransition(run, { type: "context_ready", snapshotId: value.snapshotId });
       return "continue";
     }
-    this.applyTransition(run, {
-      type: "compaction_required",
-      requestArtifactId: value.requestArtifactId,
-    });
+    this.applyTransition(run, { type: "compaction_required" });
     return "continue";
   }
 
@@ -301,13 +312,8 @@ export class RunDriver {
       createdAt: now,
       updatedAt: now,
     };
-    const requestArtifactId = this.storeArtifact(
-      JSON.stringify(modelRequest),
-      "application/json",
-    );
-    attempt.requestArtifactId = requestArtifactId;
-    this.insertAttempt(run, attempt);
-
+    // ADR-0001: the request artifact and its attempt are persisted together.
+    this.insertAttemptWithRequest(run, attempt, JSON.stringify(modelRequest));
     attempt.state = "dispatched";
     attempt.updatedAt = this.deps.clock.now();
     this.updateAttempt(run, attempt);
@@ -333,6 +339,9 @@ export class RunDriver {
     }));
 
     const commit = this.deps.store.transaction((tx) => {
+      // ADR-0001: never persist or publish results for a run that no longer
+      // exists or whose execution generation was superseded.
+      if (!this.executionCurrent(tx, run, attempt)) return;
       const metadata: Record<string, unknown> = {};
       if (result.toolCalls.length > 0) metadata.toolCalls = result.toolCalls;
       if (result.native !== undefined) metadata.native = result.native;
@@ -402,6 +411,7 @@ export class RunDriver {
     attempt.errorMessage = error instanceof Error ? error.message : "model request failed";
     attempt.updatedAt = this.deps.clock.now();
     const commit = this.deps.store.transaction((tx) => {
+      if (!this.executionCurrent(tx, run, attempt)) return;
       tx.attempts.update(attempt);
       tx.changes.push({
         kind: "attempt.update",
@@ -426,6 +436,7 @@ export class RunDriver {
     attempt.updatedAt = this.deps.clock.now();
 
     const commit = this.deps.store.transaction((tx) => {
+      if (!this.executionCurrent(tx, run, attempt)) return;
       // Retain committed partial output as an interrupted assistant entry so a
       // regenerated answer is never appended onto it as one stream.
       const live = tx.liveOutput.get(attempt.id);
@@ -463,7 +474,7 @@ export class RunDriver {
         createdAt: this.deps.clock.now(),
         updatedAt: this.deps.clock.now(),
       };
-      this.insertAttempt(run, retry);
+      this.insertAttemptOnly(run, retry);
       return;
     }
     if (reason === "cancelled") {
@@ -518,9 +529,8 @@ export class RunDriver {
         createdAt: now,
         updatedAt: now,
       };
-      attempt.requestArtifactId = this.storeArtifact(JSON.stringify(prepared.arguments), "application/json");
-      this.insertAttempt(run, attempt);
-
+      // ADR-0001: request artifact and attempt insert share one transaction.
+      this.insertAttemptWithRequest(run, attempt, JSON.stringify(prepared.arguments));
       attempt.state = "dispatched";
       attempt.updatedAt = this.deps.clock.now();
       this.updateAttempt(run, attempt);
@@ -531,12 +541,12 @@ export class RunDriver {
       );
 
       if (outcome.ok) {
-        const artifactId = this.storeArtifact(
-          JSON.stringify(outcome.value),
-          "application/json",
-        );
+        const resultJson = JSON.stringify(outcome.value);
         const resultText = renderToolResult(outcome.value);
+        // ADR-0001: the result artifact and its attempt link commit together.
         const commit = this.deps.store.transaction((tx) => {
+          if (!this.executionCurrent(tx, run, attempt)) return;
+          const artifactId = this.createArtifact(tx, resultJson);
           const entry = this.newEntry(
             tx,
             run,
@@ -600,6 +610,7 @@ export class RunDriver {
     });
     attempt.updatedAt = this.deps.clock.now();
     const commit = this.deps.store.transaction((tx) => {
+      if (!this.executionCurrent(tx, run, attempt)) return;
       tx.attempts.update(attempt);
       tx.changes.push({
         kind: "attempt.update",
@@ -614,6 +625,7 @@ export class RunDriver {
   private recordToolError(run: RunRecord, tool: PersistedToolCall, error: unknown): void {
     const message = error instanceof Error ? error.message : "tool failed";
     const commit = this.deps.store.transaction((tx) => {
+      if (!this.executionCurrent(tx, run)) return;
       const entry = this.newEntry(
         tx,
         run,
@@ -638,8 +650,32 @@ export class RunDriver {
   // Helpers
   // -------------------------------------------------------------------------
 
-  private insertAttempt(run: RunRecord, attempt: AttemptRecord): void {
+  /**
+   * ADR-0001: create the request artifact and insert its attempt in one
+   * transaction so an interrupted execution cannot leave an unlinked payload.
+   */
+  private insertAttemptWithRequest(
+    run: RunRecord,
+    attempt: AttemptRecord,
+    requestJson: string,
+  ): void {
     const commit = this.deps.store.transaction((tx) => {
+      if (!this.executionCurrent(tx, run)) return;
+      attempt.requestArtifactId = this.createArtifact(tx, requestJson);
+      tx.attempts.insert(attempt);
+      tx.changes.push({
+        kind: "attempt.update",
+        conversationId: run.conversationId,
+        value: projectAttempt(attempt),
+      });
+    });
+    this.deps.publish(commit);
+  }
+
+  /** Insert a retry attempt that reuses its parent's request artifact. */
+  private insertAttemptOnly(run: RunRecord, attempt: AttemptRecord): void {
+    const commit = this.deps.store.transaction((tx) => {
+      if (!this.executionCurrent(tx, run)) return;
       tx.attempts.insert(attempt);
       tx.changes.push({
         kind: "attempt.update",
@@ -652,6 +688,7 @@ export class RunDriver {
 
   private updateAttempt(run: RunRecord, attempt: AttemptRecord): void {
     const commit = this.deps.store.transaction((tx) => {
+      if (!this.executionCurrent(tx, run, attempt)) return;
       tx.attempts.update(attempt);
       tx.changes.push({
         kind: "attempt.update",
@@ -660,6 +697,32 @@ export class RunDriver {
       });
     });
     this.deps.publish(commit);
+  }
+
+  /**
+   * ADR-0001: a persistence boundary may only write while the conversation,
+   * run, attempt, and execution generation still exist as expected.
+   */
+  private executionCurrent(tx: StoreTransaction, run: RunRecord, attempt?: AttemptRecord): boolean {
+    if (!tx.conversations.get(run.conversationId)) return false;
+    const currentRun = tx.runs.get(run.id);
+    if (!currentRun || currentRun.generation !== run.generation) return false;
+    if (attempt && !tx.attempts.get(attempt.id)) return false;
+    return true;
+  }
+
+  /** ADR-0001: discard in-memory execution state for a deleted run. */
+  discardRun(runId: RunId): void {
+    const controller = this.activeControllers.get(runId);
+    if (controller) {
+      controller.abort("deleted");
+      this.activeControllers.delete(runId);
+    }
+  }
+
+  /** ADR-0001: drop buffered output for a deleted attempt without writing it. */
+  discardAttempt(attemptId: AttemptId): void {
+    this.deps.committer.discard(attemptId);
   }
 
   private newEntry(
@@ -692,21 +755,18 @@ export class RunDriver {
     return entry;
   }
 
-  private storeArtifact(content: string, mimeType: string): string {
+  private createArtifact(tx: StoreTransaction, content: string): string {
     const id = this.deps.ids.next("artifact");
-    const commit = this.deps.store.transaction((tx) => {
-      tx.artifacts.create({
-        id,
-        mimeType,
-        encoding: "utf8",
-        byteCount: 0,
-        complete: false,
-        createdAt: this.deps.clock.now(),
-      });
-      tx.artifacts.appendChunk(id, 0, content, content.length);
-      tx.artifacts.complete(id, `${content.length}`);
+    tx.artifacts.create({
+      id,
+      mimeType: "application/json",
+      encoding: "utf8",
+      byteCount: 0,
+      complete: false,
+      createdAt: this.deps.clock.now(),
     });
-    this.deps.publish(commit);
+    tx.artifacts.appendChunk(id, 0, content, content.length);
+    tx.artifacts.complete(id, `${content.length}`);
     return id;
   }
 
