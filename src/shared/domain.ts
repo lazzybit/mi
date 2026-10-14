@@ -207,6 +207,8 @@ export interface ConversationSnapshot {
   activeRun?: RunView;
   activeAttempt?: AttemptView;
   queuedInputs: SubmissionView[];
+  /** Skills explicitly selected for this conversation. */
+  selectedSkillIds?: string[];
 }
 
 export interface ModelProfileView {

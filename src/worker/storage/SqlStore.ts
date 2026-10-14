@@ -213,6 +213,7 @@ export function buildSnapshot(tx: StoreTransaction, conversationId?: Conversatio
           return projected;
         }),
         queuedInputs: [...queuedInputs, ...steering].map(projectSubmission),
+        selectedSkillIds: tx.skills.selectedForConversation(conversationId).map((record) => record.skillId),
       } as NonNullable<OwnerSnapshot["selectedConversation"]>;
       if (entries.length > 0) {
         const firstSeq = entries[0]?.sequence ?? 1;

@@ -338,7 +338,16 @@ export class RunControlService {
       if (!skill || skill.deleted) throw new AppError("NOT_FOUND", `skill not found: ${skillId}`);
     }
     tx.skills.selectForConversation(input.conversationId, input.skillIds);
-    return { value: undefined, changes: [] };
+    return {
+      value: undefined,
+      changes: [
+        {
+          kind: "conversation.skills",
+          conversationId: input.conversationId,
+          skillIds: [...input.skillIds],
+        },
+      ],
+    };
   }
 }
 

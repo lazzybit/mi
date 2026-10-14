@@ -3,6 +3,7 @@ import type { JSX } from "@solidjs/web";
 import type { OwnerSnapshot, TranscriptEntryView } from "../../shared/domain";
 import type { ConnectionStatus } from "../sync/ConversationFeed";
 import { Composer } from "./Composer";
+import { ConversationSkillPicker } from "./ConversationSkillPicker";
 import { QueuePanel } from "./QueuePanel";
 import { RecoveryPanel } from "./RecoveryPanel";
 import { RunStatusBar } from "./RunStatusBar";
@@ -42,6 +43,21 @@ export function ConversationScreen(props: {
             <header class="conversation-header">
               <h2>{selected().conversation.title}</h2>
             </header>
+            <details class="conversation-skills">
+              <summary>Skills</summary>
+              <ConversationSkillPicker
+                skills={props.snapshot.configuration.skills.filter(
+                  (skill) => skill.enabled && !skill.deleted,
+                )}
+                selected={selected().selectedSkillIds ?? []}
+                onChange={(skillIds) =>
+                  void props.actions.dispatch("skill.select_for_conversation", {
+                    conversationId: selected().conversation.id,
+                    skillIds,
+                  })
+                }
+              />
+            </details>
             <RunStatusBar
               run={selected().activeRun}
               attempt={selected().activeAttempt}

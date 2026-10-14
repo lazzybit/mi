@@ -166,6 +166,34 @@ button {
   font-size: 1rem;
 }
 
+.conversation-skills {
+  border-bottom: 1px solid var(--border);
+  padding: 0.35rem 0.75rem;
+  font-size: 0.85rem;
+}
+
+.conversation-skills summary {
+  display: flex;
+  align-items: center;
+  min-height: 44px;
+  cursor: pointer;
+  color: var(--muted);
+}
+
+.skill-picker {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  padding-bottom: 0.5rem;
+}
+
+.skill-option {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  min-height: 44px;
+}
+
 .run-status {
   display: flex;
   gap: 0.75rem;

@@ -60,7 +60,6 @@ const CONFIGURATION_COMMANDS = new Set([
   "skill.update",
   "skill.disable",
   "skill.remove",
-  "skill.select_for_conversation",
 ]);
 
 export interface OwnerRuntimeDeps {

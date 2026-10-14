@@ -59,6 +59,14 @@ export function applyChange(snapshot: OwnerSnapshot, change: ViewChange): OwnerS
       if (!selected || selected.conversation.id !== change.conversationId) return snapshot;
       return { ...snapshot, selectedConversation: { ...selected, queuedInputs: change.values } };
     }
+    case "conversation.skills": {
+      const selected = snapshot.selectedConversation;
+      if (!selected || selected.conversation.id !== change.conversationId) return snapshot;
+      return {
+        ...snapshot,
+        selectedConversation: { ...selected, selectedSkillIds: change.skillIds },
+      };
+    }
     case "configuration.update":
       return { ...snapshot, configuration: change.value };
     default:

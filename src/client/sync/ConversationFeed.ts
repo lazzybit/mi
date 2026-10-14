@@ -30,6 +30,7 @@ export class ConversationFeed implements ConversationViewSource {
   private selection?: ConversationId;
   private status: ConnectionStatus = "connecting";
   private disposed = false;
+  private listening = false;
   private retry = 0;
   private reconnectTimer?: ReturnType<typeof setTimeout>;
   private readonly valueListeners = new Set<(snapshot: OwnerSnapshot) => void>();
@@ -48,19 +49,25 @@ export class ConversationFeed implements ConversationViewSource {
 
   connect(): void {
     if (this.disposed) return;
+    this.listenForNetwork();
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = undefined;
+    }
     this.setStatus(this.retry === 0 ? "connecting" : "reconnecting");
     const url = new URL(this.url, globalThis.location?.origin ?? "http://localhost");
     if (this.selection) url.searchParams.set("conversationId", this.selection);
     const socket = new WebSocket(url.toString());
     this.socket = socket;
     socket.addEventListener("open", () => {
+      if (this.socket !== socket) return;
       this.retry = 0;
       this.setStatus("live");
       this.send({ type: "subscribe", conversationId: this.selection });
     });
     socket.addEventListener("message", (event) => this.onMessage(event.data));
-    socket.addEventListener("close", (event) => this.onClose(event.code));
-    socket.addEventListener("error", () => this.onClose(undefined));
+    socket.addEventListener("close", (event) => this.onClose(socket, event.code));
+    socket.addEventListener("error", () => this.onClose(socket, undefined));
   }
 
   select(conversationId?: ConversationId): void {
@@ -78,6 +85,7 @@ export class ConversationFeed implements ConversationViewSource {
   dispose(): void {
     this.disposed = true;
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
+    this.stopNetworkListeners();
     this.socket?.close();
   }
 
@@ -121,10 +129,17 @@ export class ConversationFeed implements ConversationViewSource {
     if (this.snapshot) this.emit(applyChanges(this.snapshot, frame.changes));
   }
 
-  private onClose(code?: number): void {
-    if (this.disposed) return;
+  private onClose(socket: WebSocket, code?: number): void {
+    // Ignore events from a socket that has already been replaced.
+    if (this.disposed || this.socket !== socket) return;
     if (code === 4401) {
       this.setStatus("authentication_required");
+      return;
+    }
+    // A dropped connection while the browser reports no network is not a
+    // reconnect attempt; keep the distinct offline state.
+    if (typeof navigator !== "undefined" && navigator.onLine === false) {
+      this.setStatus("offline");
       return;
     }
     this.setStatus("reconnecting");
@@ -143,6 +158,35 @@ export class ConversationFeed implements ConversationViewSource {
   private setStatus(status: ConnectionStatus): void {
     this.status = status;
     for (const listener of this.statusListeners) listener(status);
+  }
+
+  private readonly handleOffline = (): void => {
+    if (this.disposed) return;
+    this.setStatus("offline");
+  };
+
+  private readonly handleOnline = (): void => {
+    if (this.disposed) return;
+    this.retry = 0;
+    const stale = this.socket;
+    this.connect();
+    stale?.close();
+  };
+
+  private listenForNetwork(): void {
+    if (this.listening || typeof globalThis.addEventListener !== "function") return;
+    this.listening = true;
+    globalThis.addEventListener("offline", this.handleOffline);
+    globalThis.addEventListener("online", this.handleOnline);
+  }
+
+  private stopNetworkListeners(): void {
+    if (!this.listening) return;
+    this.listening = false;
+    if (typeof globalThis.removeEventListener === "function") {
+      globalThis.removeEventListener("offline", this.handleOffline);
+      globalThis.removeEventListener("online", this.handleOnline);
+    }
   }
 
   private send(frame: ClientFrame): void {

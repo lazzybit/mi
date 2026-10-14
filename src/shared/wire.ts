@@ -18,6 +18,7 @@ export type ViewChange =
   | { kind: "entry.update"; conversationId: ConversationId; value: TranscriptEntryView }
   | { kind: "attempt.update"; conversationId: ConversationId; value: AttemptView }
   | { kind: "run.update"; conversationId: ConversationId; value: RunView }
+  | { kind: "conversation.skills"; conversationId: ConversationId; skillIds: string[] }
   | { kind: "inbox.replace"; conversationId: ConversationId; values: SubmissionView[] }
   | { kind: "configuration.update"; value: ConfigurationStatusView };
 
