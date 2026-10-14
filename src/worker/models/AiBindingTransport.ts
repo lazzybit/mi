@@ -12,7 +12,13 @@ export class AiBindingTransport implements GatewayTransport {
   async send(request: GatewayRequest, signal: AbortSignal): Promise<Response> {
     const gateway = this.resolve().gateway(request.gatewayId);
     const base = await gateway.getUrl(request.provider);
-    const url = `${base.replace(/\/+$/, "")}${request.path}`;
+    // The unified (OpenAI-compatible) endpoint is mounted at
+    // `/compat/chat/completions`, and AI Gateway dynamic routes
+    // (`dynamic/<route>`) are invoked through it. Codecs emit the
+    // provider-native `/v1/...` path, so drop that segment for this provider.
+    const path =
+      request.provider === "compat" ? request.path.replace(/^\/v1\//, "/") : request.path;
+    const url = `${base.replace(/\/+$/, "")}${path}`;
     return fetch(url, {
       method: "POST",
       headers: {
