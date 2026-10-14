@@ -12,7 +12,8 @@ export class DraftStore {
 
   set(conversationId: string, value: string): void {
     if (typeof localStorage === "undefined") {
-      this.memory.set(conversationId, value);
+      if (value) this.memory.set(conversationId, value);
+      else this.memory.delete(conversationId);
       return;
     }
     try {
@@ -37,9 +38,11 @@ export class DraftStore {
       for (let index = 0; index < localStorage.length; index += 1) {
         const key = localStorage.key(index);
         if (!key || !key.startsWith(KEY_PREFIX)) continue;
+        const item = localStorage.getItem(key) ?? "";
+        if (!item) continue;
         drafts.push({
           conversationId: key.slice(KEY_PREFIX.length),
-          value: localStorage.getItem(key) ?? "",
+          value: item,
         });
       }
     } catch {

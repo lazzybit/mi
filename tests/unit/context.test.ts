@@ -77,7 +77,7 @@ describe("buildHistory", () => {
 
 describe("compaction preserves source history", () => {
   it("creates a summary without deleting original entries", async () => {
-    const { runtime, model } = createTestRuntime();
+    const { runtime, model, backend } = createTestRuntime();
     await runtime.dispatch("saveModelProfile", [
       envelope({
         profile: { ...TEST_MODEL_PROFILE, contextWindow: 24, maxOutputTokens: 8 },
@@ -118,5 +118,14 @@ describe("compaction preserves source history", () => {
     expect(kinds).toContain("user");
     expect(kinds).toContain("summary");
     expect(kinds).toContain("assistant");
+    // ADR-0001: compaction no longer leaves an unlinked plan artifact.
+    const unlinked = backend.db
+      .prepare(
+        `SELECT COUNT(*) AS n FROM artifacts a WHERE NOT EXISTS (
+           SELECT 1 FROM attempts t
+           WHERE t.request_artifact_id = a.id OR t.result_artifact_id = a.id)`,
+      )
+      .get() as { n: number };
+    expect(Number(unlinked.n)).toBe(0);
   });
 });

@@ -12,7 +12,7 @@
 // rolled back before its rejection is stored, so a delayed retry returns the
 // original refusal instead of running the destructive command later.
 
-import { AppError, type ApiError, type CommandEnvelope, type CommandReceipt } from "../../shared/domain";
+import { AppError, appErrorFromApi, type ApiError, type CommandEnvelope, type CommandReceipt } from "../../shared/domain";
 import { hashPayload } from "../../shared/json";
 import type { Commit, SqlStore, StoreTransaction } from "../storage/SqlStore";
 import type { ServiceOutcome } from "../conversations/services";
@@ -63,7 +63,7 @@ export class CommandProcessor {
           );
         }
         if (existing.outcome === "rejected") {
-          throw errorFromApi(JSON.parse(existing.resultJson) as ApiError);
+          throw appErrorFromApi(JSON.parse(existing.resultJson) as ApiError);
         }
         return {
           commandId: envelope.commandId,
@@ -130,8 +130,4 @@ export class CommandProcessor {
       });
     });
   }
-}
-
-function errorFromApi(api: ApiError): AppError {
-  return new AppError(api.code, api.message, api.retryable);
 }

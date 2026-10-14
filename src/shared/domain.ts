@@ -124,6 +124,14 @@ export class AppError extends Error {
   }
 }
 
+/**
+ * ADR-0001: reconstruct a browser-local `AppError` from a serialized
+ * application error that crossed a server-function boundary.
+ */
+export function appErrorFromApi(api: ApiError): AppError {
+  return new AppError(api.code, api.message, api.retryable);
+}
+
 // ---------------------------------------------------------------------------
 // Display / projection types (separate from persistence records)
 // ---------------------------------------------------------------------------

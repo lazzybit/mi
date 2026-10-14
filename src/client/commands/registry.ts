@@ -3,7 +3,7 @@
 // function references while an old bundle keeps an outbox entry; the entry is
 // resent through the current reference for the same logical kind.
 
-import { AppError, type CommandFunctionOutcome, type CommandReceipt } from "../../shared/domain";
+import { appErrorFromApi, type CommandFunctionOutcome, type CommandReceipt } from "../../shared/domain";
 import {
   cancelRun,
   resolveAttempt,
@@ -28,7 +28,7 @@ import type { CommandHandler } from "./CommandDispatcher";
 // definitive rejection from a transport failure.
 function unwrap<T>(outcome: CommandFunctionOutcome<T>): CommandReceipt<T> {
   if (outcome.ok) return outcome.receipt;
-  throw new AppError(outcome.error.code, outcome.error.message, outcome.error.retryable);
+  throw appErrorFromApi(outcome.error);
 }
 
 export function createCommandHandlers(): Record<string, CommandHandler> {
