@@ -7,7 +7,7 @@ import type { PersistedToolCall, RunCheckpoint, RunRecord } from "../storage/rec
 export type RuntimeEvent =
   | { type: "start"; contextSnapshotId?: string }
   | { type: "context_ready"; snapshotId: string }
-  | { type: "compaction_required" }
+  | { type: "compaction_required"; plan?: RunCheckpoint["compactionPlan"] }
   | { type: "model_finished"; entryId: string; tools: PersistedToolCall[] }
   | { type: "tool_finished"; attemptId: AttemptId }
   | { type: "authentication_required"; connectorId: ConnectorId }
@@ -74,6 +74,11 @@ export class RunMachine {
           throw new InvalidTransitionError(run, event);
         }
         checkpoint.phase = "compact_context";
+        // ADR-0002: the planner's selected source range travels with the
+        // transition so the compaction attempt consumes exactly that range.
+        if (event.type === "compaction_required" && event.plan) {
+          checkpoint.compactionPlan = event.plan;
+        }
         return {
           nextState: "running",
           nextCheckpoint: checkpoint,

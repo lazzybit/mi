@@ -1,19 +1,36 @@
-// Alarm-backed server-side driver (PLAN.md -> Execution engine). The driver
-// coordinates effects; `RunMachine` owns the pure transitions.
+// Alarm-backed server-side driver (ADR-0002). The driver coordinates effects;
+// `RunMachine` owns the pure transitions. pi-ai owns provider semantics and
+// error classification; the driver owns durable attempts, dispatch, retries,
+// and their bookkeeping.
 
+import { isRetryableAssistantError, retryDelayMs } from "@earendil-works/pi-ai";
 import { AppError, type AttemptId, type RunId } from "../../shared/domain";
 import type { ViewChange } from "../../shared/wire";
 import type { Commit, SqlStore, StoreTransaction } from "../storage/SqlStore";
-import type { AttemptRecord, EntryRecord, PersistedToolCall, RunRecord } from "../storage/records";
+import type {
+  ActiveAttemptPointer,
+  AttemptRecord,
+  EntryRecord,
+  PersistedToolCall,
+  RunCheckpoint,
+  RunRecord,
+} from "../storage/records";
 import { projectAttempt, projectEntry, projectRun, projectSubmission } from "../storage/projections";
 import type { ContextAssembler } from "../context/ContextAssembler";
-import { buildHistory } from "../context/ContextAssembler";
+import { compactionRequest } from "../context/ContextAssembler";
+import type { ContextBudget } from "../context/ContextBudget";
 import type { ToolExecutor, PreparedToolCall } from "../mcp/types";
-import type { ModelAttemptResult, ModelRequest } from "../models/types";
+import type {
+  CanonicalModelRequest,
+  ModelAttemptResult,
+  ModelRequest,
+  PersistedModelToolCall,
+} from "../models/types";
 import type { Clock, IdGenerator } from "./Clock";
-import { AttemptAbortedError, AttemptExecutor } from "./AttemptExecutor";
+import { AttemptAbortedError, AttemptExecutor, failedAssistantMessage } from "./AttemptExecutor";
 import { OutputCommitter } from "./OutputCommitter";
 import { RunMachine, type RuntimeEvent } from "./RunMachine";
+import { countInvocationChain, createRetryChild } from "./RetryBookkeeping";
 import { WakeScheduler } from "./WakeScheduler";
 import { DEFAULT_RUNTIME_LIMITS, type RuntimeLimits } from "./limits";
 
@@ -23,6 +40,7 @@ export interface RunDriverDeps {
   ids: IdGenerator;
   machine: RunMachine;
   context: ContextAssembler;
+  budget: ContextBudget;
   executor: AttemptExecutor;
   tools: ToolExecutor;
   committer: OutputCommitter;
@@ -51,10 +69,14 @@ export class RunDriver {
     this.driving = true;
     try {
       const deadline = this.deps.clock.now() + this.limits.sliceBudgetMs;
+      // ADR-0002: runs that made no progress this slice (for example a
+      // prepared retry waiting on persisted backoff) are skipped so other
+      // work still runs; the scan ends when every active run is stalled.
+      const stalled = new Set<RunId>();
       for (;;) {
         if (this.deps.clock.now() >= deadline) break;
-        const didWork = await this.driveNextRun(deadline);
-        if (!didWork) break;
+        const outcome = await this.driveNextRun(deadline, stalled);
+        if (outcome === "none") break;
       }
       await this.reconcileWake();
     } finally {
@@ -62,40 +84,83 @@ export class RunDriver {
     }
   }
 
-  /** Called by the alarm handler before selecting work. */
+  /**
+   * ADR-0002: alarm reconciliation honors retry backoff instead of busy
+   * polling. The wake is the earliest persisted retry eligibility among active
+   * invocations; immediately actionable work wakes now.
+   */
   private async reconcileWake(): Promise<void> {
     const next = this.deps.store.read((tx) => {
       const active = tx.runs.activeRuns();
-      const runnable = active.find((run) => run.state === "running" || run.state === "queued");
+      const runnable = active.some(
+        (run) =>
+          run.state === "running" ||
+          run.state === "queued" ||
+          run.cancelRequestedAt !== undefined,
+      );
       if (!runnable) return null;
-      return this.deps.clock.now();
+      const now = this.deps.clock.now();
+      let earliestBackoff: number | undefined;
+      for (const run of active) {
+        if (run.cancelRequestedAt !== undefined) return now;
+        if (run.state === "queued") return now;
+        const pointer = run.checkpoint.activeAttempt;
+        const attempt = pointer ? tx.attempts.get(pointer.attemptId) : undefined;
+        if (!attempt || attempt.state !== "prepared" || attempt.retryEligibleAt === undefined) {
+          return now;
+        }
+        earliestBackoff =
+          earliestBackoff === undefined
+            ? attempt.retryEligibleAt
+            : Math.min(earliestBackoff, attempt.retryEligibleAt);
+      }
+      return earliestBackoff !== undefined ? Math.max(now, earliestBackoff) : now;
     });
     await this.deps.wake.reconcile(next);
   }
 
-  private async driveNextRun(deadline: number): Promise<boolean> {
+  private async driveNextRun(
+    deadline: number,
+    stalled: Set<RunId>,
+  ): Promise<"progress" | "stall" | "none"> {
     const selected = this.deps.store.read((tx) => {
       const active = tx.runs.activeRuns();
-      const running = active.find((run) => run.state === "running");
+      const selectable = (run: RunRecord) => !stalled.has(run.id);
+      const running = active.find((run) => run.state === "running" && selectable(run));
       if (running) return running;
       // ADR-0001: a paused run with a persisted cancellation request must be
       // selectable so cancellation can reach a terminal state.
-      const cancellable = active.find((run) => run.cancelRequestedAt !== undefined);
+      const cancellable = active.find((run) => run.cancelRequestedAt !== undefined && selectable(run));
       if (cancellable) return cancellable;
       const blocked = active.find(
-        (run) => run.state === "waiting_for_auth" || run.state === "needs_attention",
+        (run) =>
+          (run.state === "waiting_for_auth" || run.state === "needs_attention") &&
+          selectable(run),
       );
       if (blocked) return undefined;
-      return active.find((run) => run.state === "queued");
+      return active.find((run) => run.state === "queued" && selectable(run));
     });
-    if (!selected) return false;
+    if (!selected) return "none";
 
     let run = selected;
     if (run.state === "queued") {
       run = this.applyTransition(run, { type: "start" });
     }
     await this.runLoop(run, deadline);
-    return true;
+    // A slice that wrote nothing for this run marks it stalled instead of
+    // spinning on it (ADR-0002 backoff waits).
+    const after = this.reload(selected.id);
+    const progressed =
+      after !== undefined &&
+      (after.state !== selected.state ||
+        after.phase !== selected.phase ||
+        after.updatedAt !== selected.updatedAt ||
+        JSON.stringify(after.checkpoint) !== JSON.stringify(selected.checkpoint));
+    if (progressed) {
+      return "progress";
+    }
+    stalled.add(selected.id);
+    return "stall";
   }
 
   private async runLoop(initial: RunRecord, deadline: number): Promise<void> {
@@ -107,13 +172,22 @@ export class RunDriver {
       if (!reloaded) return;
       run = reloaded;
       if (run.state === "completed" || run.state === "cancelled" || run.state === "failed") return;
-      // Cancellation is processed before paused work blocks driver selection.
+      // Cancellation is processed before paused work blocks driver selection,
+      // and takes priority over scheduled retry backoff (ADR-0002).
       if (run.cancelRequestedAt !== undefined) {
         this.applyTransition(run, { type: "cancel_requested" });
         return;
       }
       if (run.state === "waiting_for_auth" || run.state === "needs_attention") return;
       if (this.deps.clock.now() >= deadline) return;
+
+      // ADR-0002: a prepared retry waiting on persisted backoff performs no
+      // work in this slice; the alarm is scheduled at its eligibility time.
+      const waiting = this.backoffWait(run);
+      if (waiting !== undefined) {
+        await this.deps.wake.ensureWakeBy(waiting);
+        return;
+      }
 
       let status: StepStatus;
       switch (run.phase) {
@@ -136,6 +210,18 @@ export class RunDriver {
       }
       if (status === "paused" || status === "terminal" || status === "budget") return;
     }
+  }
+
+  /** Wake time for a run whose active attempt is waiting on backoff. */
+  private backoffWait(run: RunRecord): number | undefined {
+    const pointer = run.checkpoint.activeAttempt;
+    if (!pointer) return undefined;
+    if (run.phase !== "request_model" && run.phase !== "compact_context") return undefined;
+    const attempt = this.deps.store.read((tx) => tx.attempts.get(pointer.attemptId));
+    if (!attempt || attempt.state !== "prepared") return undefined;
+    if (attempt.retryEligibleAt === undefined) return undefined;
+    const now = this.deps.clock.now();
+    return attempt.retryEligibleAt > now ? attempt.retryEligibleAt : undefined;
   }
 
   /** Mark the queued submissions that started this run as accepted. */
@@ -223,7 +309,22 @@ export class RunDriver {
       this.applyTransition(run, { type: "context_ready", snapshotId: value.snapshotId });
       return "continue";
     }
-    this.applyTransition(run, { type: "compaction_required" });
+    if (value.kind === "over_budget") {
+      // ADR-0002: over-budget input without a safe compaction path fails
+      // explicitly instead of dispatching a request that cannot fit.
+      this.applyTransition(run, { type: "definite_failure", code: "CONTEXT_OVER_BUDGET" });
+      return "terminal";
+    }
+    // ADR-0002: the selected compaction range is persisted with the
+    // transition so the compaction attempt consumes exactly that range.
+    this.applyTransition(run, {
+      type: "compaction_required",
+      plan: {
+        firstSequence: value.plan.firstSequence,
+        lastSequence: value.plan.lastSequence,
+        digest: value.plan.digest,
+      },
+    });
     return "continue";
   }
 
@@ -232,23 +333,29 @@ export class RunDriver {
     if (outcome.status !== "succeeded") return outcome.status;
     // The summary entry was persisted by the compaction attempt; summaries
     // coexist with the original entries. Return to preparation.
+    const fresh = this.reload(run.id);
+    if (!fresh) return "terminal";
     const next: RunRecord = {
-      ...run,
+      ...fresh,
       phase: "prepare_context",
-      checkpoint: { ...run.checkpoint, phase: "prepare_context" },
+      checkpoint: { ...fresh.checkpoint, phase: "prepare_context", compactionPlan: undefined },
     };
-    this.deps.store.transaction((tx) => tx.runs.update(next));
+    this.deps.store.transaction((tx) => {
+      if (!this.executionCurrent(tx, fresh)) return;
+      tx.runs.update(next);
+    });
     return "continue";
   }
 
   private async stepRequestModel(run: RunRecord): Promise<StepStatus> {
     const outcome = await this.executeModelAttempt(run, "model");
     if (outcome.status !== "succeeded") return outcome.status;
-    const tools = outcome.toolCalls;
-    const updated = this.applyTransition(run, {
+    // Reload so the transition sees the settlement's checkpoint bookkeeping.
+    const fresh = this.reload(run.id) ?? run;
+    const updated = this.applyTransition(fresh, {
       type: "model_finished",
       entryId: outcome.entryId,
-      tools,
+      tools: outcome.toolCalls,
     });
     return updated.state === "completed" ? "terminal" : "continue";
   }
@@ -263,7 +370,7 @@ export class RunDriver {
     const status = await this.executeToolAttempt(run, tool);
     if (status !== "continue") return status;
     const updated = this.applyTransition(run, { type: "tool_finished", attemptId: tool.toolCallId });
-    return updated.phase === "request_model" ? "continue" : "continue";
+    return "continue";
   }
 
   // -------------------------------------------------------------------------
@@ -277,27 +384,101 @@ export class RunDriver {
     | { status: "succeeded"; text: string; toolCalls: PersistedToolCall[]; entryId: string }
     | { status: "paused" | "terminal" | "budget" }
   > {
+    // ADR-0002: resume the prepared retry recorded for this invocation
+    // instead of creating another root attempt.
+    const pointer = run.checkpoint.activeAttempt;
+    const prepared = pointer ? this.loadActiveAttempt(run, pointer, kind) : undefined;
+    if (prepared === "conflict") {
+      this.applyTransition(run, { type: "definite_failure", code: "MODEL_STATE_CONFLICT" });
+      return { status: "terminal" };
+    }
+
+    let attempt: AttemptRecord;
+    if (prepared) {
+      attempt = prepared;
+      this.markAttemptState(run, attempt, "dispatched");
+    } else {
+      const created = this.prepareNewModelAttempt(run, kind);
+      if (!created.ok) return { status: created.status };
+      attempt = created.attempt;
+    }
+
+    await this.deps.wake.ensureWakeBy(this.deps.clock.now() + this.limits.recoveryWakeIntervalMs);
+    const request = this.loadRequest(attempt);
+    if (!request) {
+      this.settleModelFailure(run, attempt, "MODEL_ERROR", "model request artifact is missing");
+      return { status: "terminal" };
+    }
+
+    const outcome = await this.runModelAttempt(run, attempt, request);
+    if (!outcome.ok) {
+      if (outcome.reason === "failed") return { status: "terminal" };
+      if (outcome.reason === "cancelled") {
+        this.settleLocalCancellation(run, attempt);
+        return { status: "paused" };
+      }
+      this.scheduleRetry(run, attempt, "deadline");
+      return { status: "budget" };
+    }
+    return this.settleModelResult(run, attempt, outcome.value);
+  }
+
+  /**
+   * Load the active attempt referenced by the checkpoint pointer.
+   * Returns `"conflict"` for bookkeeping that must fail visibly (ADR-0002).
+   */
+  private loadActiveAttempt(
+    run: RunRecord,
+    pointer: ActiveAttemptPointer,
+    kind: "model" | "compaction",
+  ): AttemptRecord | "conflict" | undefined {
+    return this.deps.store.read((tx) => {
+      const attempt = tx.attempts.get(pointer.attemptId);
+      if (!attempt || attempt.runId !== run.id) return undefined;
+      if (attempt.kind !== kind) return "conflict";
+      if (attempt.state === "prepared") return attempt;
+      // A dispatched attempt under an active pointer within the same
+      // generation means re-entry into a live dispatch.
+      if (attempt.state === "dispatched") return "conflict";
+      return undefined;
+    });
+  }
+
+  /**
+   * Create a new root attempt for one invocation, freezing the request in its
+   * artifact inside the attempt's insert transaction (ADR-0001, ADR-0002).
+   */
+  private prepareNewModelAttempt(
+    run: RunRecord,
+    kind: "model" | "compaction",
+  ): { ok: true; attempt: AttemptRecord } | { ok: false; status: "terminal" | "budget" } {
     const attemptId = this.deps.ids.next("attempt");
-    let modelRequest: ModelRequest;
+    let modelRequest: CanonicalModelRequest;
     if (kind === "compaction") {
-      const profile = this.deps.store.read((tx) => this.deps.context.requireProfile(tx));
-      const entries = this.deps.store.read((tx) => tx.entries.listRecent(run.conversationId, 200));
-      modelRequest = {
-        attemptId,
-        profile,
-        system:
-          "Summarize the conversation so far. Preserve the objective, corrections, accepted decisions, files and commits, completed verification, outstanding work, and any unresolved remote-operation outcomes. Do not claim uncertain outcomes succeeded.",
-        history: buildHistory(entries),
-        tools: [],
-      };
+      const frozen = this.deps.store.read((tx) => this.deps.context.requireFrozenProfile(tx));
+      const plan = run.checkpoint.compactionPlan;
+      const entries = this.deps.store.read((tx) =>
+        plan
+          ? tx.entries.listRange(run.conversationId, plan.firstSequence, plan.lastSequence)
+          : // Legacy pending compaction has no persisted range; keep the
+            // historical whole-recent behavior for that state only.
+            tx.entries.listRecent(run.conversationId, 200),
+      );
+      modelRequest = compactionRequest(attemptId, frozen, entries);
+      // ADR-0002: compaction requests are budget-validated before dispatch.
+      if (this.deps.budget.assess(modelRequest.context, modelRequest.profile).overBudget) {
+        this.applyTransition(run, { type: "definite_failure", code: "CONTEXT_OVER_BUDGET" });
+        return { ok: false, status: "terminal" };
+      }
     } else {
       const snapshotId = run.checkpoint.contextSnapshotId;
       if (!snapshotId) {
         this.applyTransition(run, { type: "definite_failure", code: "NO_CONTEXT" });
-        return { status: "terminal" };
+        return { ok: false, status: "terminal" };
       }
-      const request = this.deps.store.read((tx) => this.deps.context.materialize(tx, snapshotId));
-      modelRequest = { ...request, attemptId };
+      modelRequest = this.deps.store.read((tx) =>
+        this.deps.context.materialize(tx, snapshotId, attemptId),
+      );
     }
 
     const now = this.deps.clock.now();
@@ -312,78 +493,63 @@ export class RunDriver {
       createdAt: now,
       updatedAt: now,
     };
-    // ADR-0001: the request artifact and its attempt are persisted together.
-    this.insertAttemptWithRequest(run, attempt, JSON.stringify(modelRequest));
-    attempt.state = "dispatched";
-    attempt.updatedAt = this.deps.clock.now();
-    this.updateAttempt(run, attempt);
-    await this.deps.wake.ensureWakeBy(this.deps.clock.now() + this.limits.recoveryWakeIntervalMs);
-
-    const outcome = await this.runModelAttempt(run, attempt, modelRequest);
-
-    if (!outcome.ok) {
-      if (outcome.reason === "failed") return { status: "terminal" };
-      this.settleModelInterruption(run, attempt, outcome.reason);
-      return { status: outcome.reason === "deadline" ? "budget" : "paused" };
-    }
-
-    const result = outcome.value;
-    const committed = this.deps.committer.close(attemptId);
-    const text = result.text || committed;
-
-    let entryId = "";
-    const tools: PersistedToolCall[] = result.toolCalls.map((call) => ({
-      toolCallId: call.toolCallId,
-      alias: call.name,
-      arguments: call.arguments,
-    }));
-
+    // ADR-0001: the request artifact and its attempt are persisted together;
+    // ADR-0002: the active-attempt pointer joins the same transaction so a
+    // restart either sees both or neither.
+    const pointer: ActiveAttemptPointer = { attemptId: attempt.id, kind };
     const commit = this.deps.store.transaction((tx) => {
-      // ADR-0001: never persist or publish results for a run that no longer
-      // exists or whose execution generation was superseded.
-      if (!this.executionCurrent(tx, run, attempt)) return;
-      const metadata: Record<string, unknown> = {};
-      if (result.toolCalls.length > 0) metadata.toolCalls = result.toolCalls;
-      if (result.native !== undefined) metadata.native = result.native;
-      if (result.usage !== undefined) metadata.usage = result.usage;
-      const entry = this.newEntry(tx, run, kind === "compaction" ? "summary" : "assistant", text, attemptId, metadata);
-      entryId = entry.id;
-      tx.liveOutput.clear(attemptId);
-      attempt.state = "succeeded";
-      attempt.updatedAt = this.deps.clock.now();
-      tx.attempts.update(attempt);
-      tx.changes.push({
-        kind: "entry.append",
-        conversationId: run.conversationId,
-        value: projectEntry(entry),
-      });
+      if (!this.executionCurrent(tx, run)) return;
+      attempt.requestArtifactId = this.createArtifact(tx, JSON.stringify(modelRequest));
+      tx.attempts.insert(attempt);
+      const current = tx.runs.get(run.id);
+      if (current) {
+        const updated: RunRecord = {
+          ...current,
+          checkpoint: { ...current.checkpoint, activeAttempt: pointer },
+          updatedAt: this.deps.clock.now(),
+        };
+        tx.runs.update(updated);
+        tx.changes.push({
+          kind: "run.update",
+          conversationId: run.conversationId,
+          value: projectRun(updated),
+        });
+      }
       tx.changes.push({
         kind: "attempt.update",
         conversationId: run.conversationId,
         value: projectAttempt(attempt),
       });
-      // Display cards for tool calls (the assistant metadata carries the model
-      // representation).
-      for (const call of result.toolCalls) {
-        const callEntry = this.newEntry(
-          tx,
-          run,
-          "tool_call",
-          undefined,
-          attemptId,
-          { arguments: call.arguments, alias: call.name },
-          call.toolCallId,
-          call.name,
-        );
-        tx.changes.push({
-          kind: "entry.append",
-          conversationId: run.conversationId,
-          value: projectEntry(callEntry),
-        });
-      }
     });
     this.deps.publish(commit);
-    return { status: "succeeded", text, toolCalls: tools, entryId };
+    attempt.state = "dispatched";
+    attempt.updatedAt = this.deps.clock.now();
+    this.updateAttempt(run, attempt);
+    return { ok: true, attempt };
+  }
+
+  /** Parse the frozen request artifact for dispatch (ADR-0002). */
+  private loadRequest(attempt: AttemptRecord): ModelRequest | undefined {
+    const artifactId = attempt.requestArtifactId;
+    if (!artifactId) return undefined;
+    const json = this.deps.store.read((tx) =>
+      tx.artifacts
+        .readChunks(artifactId)
+        .map((chunk) => chunk.data)
+        .join(""),
+    );
+    if (!json) return undefined;
+    try {
+      const parsed = JSON.parse(json) as ModelRequest;
+      if (parsed && typeof parsed === "object" && (parsed as CanonicalModelRequest).version === 2) {
+        // Retries reuse the frozen artifact; only the local executing attempt
+        // identity changes.
+        return { ...(parsed as CanonicalModelRequest), attemptId: attempt.id };
+      }
+      return parsed;
+    } catch {
+      return undefined;
+    }
   }
 
   private async runModelAttempt(
@@ -400,45 +566,312 @@ export class RunDriver {
       );
     } catch (error) {
       // A gateway/transport failure is a definite failure, not an interruption.
-      this.settleModelFailure(run, attempt, error);
+      this.settleModelFailure(
+        run,
+        attempt,
+        error instanceof AppError ? error.code : "MODEL_ERROR",
+        error instanceof Error ? error.message : "model request failed",
+      );
       return { ok: false, reason: "failed" };
     }
   }
 
-  private settleModelFailure(run: RunRecord, attempt: AttemptRecord, error: unknown): void {
-    attempt.state = "failed";
-    attempt.errorCode = error instanceof AppError ? error.code : "MODEL_ERROR";
-    attempt.errorMessage = error instanceof Error ? error.message : "model request failed";
-    attempt.updatedAt = this.deps.clock.now();
+  /**
+   * ADR-0002: settle one terminal model result according to its stop reason.
+   * Only fully completed tool-use responses may dispatch tools.
+   */
+  private settleModelResult(
+    run: RunRecord,
+    attempt: AttemptRecord,
+    result: ModelAttemptResult,
+  ):
+    | { status: "succeeded"; text: string; toolCalls: PersistedToolCall[]; entryId: string }
+    | { status: "paused" | "terminal" | "budget" } {
+    const message = result.message;
+    switch (message.stopReason) {
+      case "stop":
+      case "toolUse":
+        return this.settleModelSuccess(run, attempt, result);
+      case "length":
+        return this.settleOutputLimit(run, attempt, result);
+      case "error":
+        return this.settleModelError(run, attempt, result);
+      case "aborted":
+        return this.settleUnexplainedAbort(run, attempt, result);
+      default:
+        // `pending` terminals and unsolicited `deferred` results are protocol
+        // violations, not successes.
+        this.settleModelFailure(
+          run,
+          attempt,
+          "MODEL_ERROR",
+          `unacceptable model stop reason: ${message.stopReason}`,
+        );
+        return { status: "terminal" };
+    }
+  }
+
+  private settleModelSuccess(
+    run: RunRecord,
+    attempt: AttemptRecord,
+    result: ModelAttemptResult,
+  ):
+    | { status: "succeeded"; text: string; toolCalls: PersistedToolCall[]; entryId: string }
+    | { status: "terminal" } {
+    const message = result.message;
+    const toolCalls = toolCallsOf(message);
+    // ADR-0002: a "stop" turn carrying tool calls is a protocol
+    // inconsistency, not permission to execute them.
+    if (message.stopReason === "stop" && toolCalls.length > 0) {
+      this.settleModelFailure(
+        run,
+        attempt,
+        "MODEL_ERROR",
+        "model returned tool calls with a stop reason",
+      );
+      return { status: "terminal" };
+    }
+    const committed = this.deps.committer.close(attempt.id);
+    const text = textOf(message) || committed;
+    const kind = attempt.kind;
+    let entryId: string | undefined;
     const commit = this.deps.store.transaction((tx) => {
-      if (!this.executionCurrent(tx, run, attempt)) return;
+      // ADR-0001: never persist or publish results for a run that no longer
+      // exists or whose execution generation was superseded.
+      const current = this.fenceRun(tx, run, attempt);
+      if (!current) return;
+      // ADR-0002: the terminal result is linked to its attempt in the same
+      // transaction that settles the attempt, appends the entry, and clears
+      // the active-attempt pointer.
+      const artifactId = this.createArtifact(
+        tx,
+        JSON.stringify({ version: 1, message } satisfies PersistedModelResult),
+      );
+      const metadata: Record<string, unknown> = {
+        modelMessage: { version: 1, message },
+      };
+      const entry = this.newEntry(
+        tx,
+        run,
+        kind === "compaction" ? "summary" : "assistant",
+        text,
+        attempt.id,
+        metadata,
+      );
+      entryId = entry.id;
+      tx.liveOutput.clear(attempt.id);
+      attempt.state = "succeeded";
+      attempt.resultArtifactId = artifactId;
+      attempt.updatedAt = this.deps.clock.now();
       tx.attempts.update(attempt);
+      const updated: RunRecord = {
+        ...current,
+        checkpoint: { ...current.checkpoint, activeAttempt: undefined },
+        updatedAt: this.deps.clock.now(),
+      };
+      tx.runs.update(updated);
+      tx.changes.push({
+        kind: "entry.append",
+        conversationId: run.conversationId,
+        value: projectEntry(entry),
+      });
       tx.changes.push({
         kind: "attempt.update",
         conversationId: run.conversationId,
         value: projectAttempt(attempt),
       });
+      tx.changes.push({
+        kind: "run.update",
+        conversationId: run.conversationId,
+        value: projectRun(updated),
+      });
+      // Display cards for tool calls (the model message carries the
+      // authoritative representation).
+      for (const call of toolCalls) {
+        const callEntry = this.newEntry(
+          tx,
+          run,
+          "tool_call",
+          undefined,
+          attempt.id,
+          { arguments: call.arguments, alias: call.name },
+          call.toolCallId,
+          call.name,
+        );
+        tx.changes.push({
+          kind: "entry.append",
+          conversationId: run.conversationId,
+          value: projectEntry(callEntry),
+        });
+      }
     });
     this.deps.publish(commit);
-    this.applyTransition(run, { type: "definite_failure", code: attempt.errorCode ?? "MODEL_ERROR" });
+    if (entryId === undefined) return { status: "terminal" };
+    const tools: PersistedToolCall[] = toolCalls.map((call) => ({
+      toolCallId: call.toolCallId,
+      alias: call.name,
+      arguments: call.arguments,
+    }));
+    return { status: "succeeded", text, toolCalls: tools, entryId };
   }
 
-  private settleModelInterruption(
+  /** ADR-0002: `length` preserves the truncated response and never retries. */
+  private settleOutputLimit(
     run: RunRecord,
     attempt: AttemptRecord,
-    reason: "cancelled" | "deadline",
-  ): void {
-    const count = this.deps.store.read((tx) => tx.attempts.countForRunKind(run.id, attempt.kind));
-    const canRetry = reason === "deadline" && count < this.limits.maxModelAttempts;
-    attempt.state = canRetry ? "interrupted" : "failed";
-    attempt.errorCode = reason === "deadline" ? "MODEL_INTERRUPTED" : "MODEL_CANCELLED";
-    attempt.errorMessage = reason === "deadline" ? "model attempt exceeded its budget" : "cancelled";
-    attempt.updatedAt = this.deps.clock.now();
-
+    result: ModelAttemptResult,
+  ): { status: "terminal" } {
+    const committed = this.deps.committer.close(attempt.id);
+    const text = textOf(result.message) || committed;
     const commit = this.deps.store.transaction((tx) => {
-      if (!this.executionCurrent(tx, run, attempt)) return;
-      // Retain committed partial output as an interrupted assistant entry so a
-      // regenerated answer is never appended onto it as one stream.
+      const current = this.fenceRun(tx, run, attempt);
+      if (!current) return;
+      const artifactId = this.createArtifact(
+        tx,
+        JSON.stringify({ version: 1, message: result.message } satisfies PersistedModelResult),
+      );
+      const entry = this.newEntry(tx, run, "assistant", text, attempt.id, {
+        modelMessage: { version: 1, message: result.message },
+        truncated: true,
+      });
+      tx.liveOutput.clear(attempt.id);
+      attempt.state = "failed";
+      attempt.errorCode = "MODEL_OUTPUT_LIMIT";
+      attempt.errorMessage = "the model response hit its output limit";
+      attempt.resultArtifactId = artifactId;
+      attempt.updatedAt = this.deps.clock.now();
+      tx.attempts.update(attempt);
+      const updated: RunRecord = {
+        ...current,
+        checkpoint: { ...current.checkpoint, activeAttempt: undefined },
+        updatedAt: this.deps.clock.now(),
+      };
+      tx.runs.update(updated);
+      tx.changes.push({
+        kind: "entry.append",
+        conversationId: run.conversationId,
+        value: projectEntry(entry),
+      });
+      tx.changes.push({
+        kind: "attempt.update",
+        conversationId: run.conversationId,
+        value: projectAttempt(attempt),
+      });
+      tx.changes.push({
+        kind: "run.update",
+        conversationId: run.conversationId,
+        value: projectRun(updated),
+      });
+    });
+    this.deps.publish(commit);
+    this.applyTransition(run, { type: "definite_failure", code: "MODEL_OUTPUT_LIMIT" });
+    return { status: "terminal" };
+  }
+
+  /** ADR-0002: provider errors retry only when pi-ai classifies them as transient. */
+  private settleModelError(
+    run: RunRecord,
+    attempt: AttemptRecord,
+    result: ModelAttemptResult,
+  ): { status: "terminal" | "budget" } {
+    if (isRetryableAssistantError(result.message)) {
+      this.scheduleRetry(run, attempt, "error", result.message.errorMessage);
+      return { status: "budget" };
+    }
+    this.settleFailureEvidence(run, attempt, result.message, "MODEL_ERROR");
+    return { status: "terminal" };
+  }
+
+  /** An unexplained provider abort is not success (ADR-0002). */
+  private settleUnexplainedAbort(
+    run: RunRecord,
+    attempt: AttemptRecord,
+    result: ModelAttemptResult,
+  ): { status: "terminal" } {
+    if (run.cancelRequestedAt !== undefined) {
+      this.applyTransition(run, { type: "cancel_requested" });
+      return { status: "terminal" };
+    }
+    this.settleFailureEvidence(run, attempt, result.message, "MODEL_ABORTED");
+    return { status: "terminal" };
+  }
+
+  /**
+   * Persist failure evidence: the frozen terminal message, the committed
+   * partial text, and the failed attempt, atomically (ADR-0002).
+   */
+  private settleFailureEvidence(
+    run: RunRecord,
+    attempt: AttemptRecord,
+    message: ModelAttemptResult["message"],
+    errorCode: string,
+  ): void {
+    const committed = this.deps.committer.close(attempt.id);
+    const text = textOf(message) || committed;
+    const commit = this.deps.store.transaction((tx) => {
+      const current = this.fenceRun(tx, run, attempt);
+      if (!current) return;
+      const artifactId = this.createArtifact(
+        tx,
+        JSON.stringify({ version: 1, message } satisfies PersistedModelResult),
+      );
+      attempt.state = "failed";
+      attempt.errorCode = errorCode;
+      attempt.errorMessage = message.errorMessage ?? "model request failed";
+      attempt.resultArtifactId = artifactId;
+      attempt.updatedAt = this.deps.clock.now();
+      tx.attempts.update(attempt);
+      if (text.length > 0) {
+        const entry = this.newEntry(tx, run, "assistant", text, attempt.id, {
+          modelMessage: { version: 1, message },
+          failed: true,
+        });
+        tx.changes.push({
+          kind: "entry.append",
+          conversationId: run.conversationId,
+          value: projectEntry(entry),
+        });
+      }
+      tx.liveOutput.clear(attempt.id);
+      const updated: RunRecord = {
+        ...current,
+        checkpoint: { ...current.checkpoint, activeAttempt: undefined },
+        updatedAt: this.deps.clock.now(),
+      };
+      tx.runs.update(updated);
+      tx.changes.push({
+        kind: "attempt.update",
+        conversationId: run.conversationId,
+        value: projectAttempt(attempt),
+      });
+      tx.changes.push({
+        kind: "run.update",
+        conversationId: run.conversationId,
+        value: projectRun(updated),
+      });
+    });
+    this.deps.publish(commit);
+    this.applyTransition(run, { type: "definite_failure", code: errorCode });
+  }
+
+  /**
+   * ADR-0002: schedule a durable retry child with persisted backoff. The
+   * parent settlement, child insert, and active-pointer update are atomic.
+   * The invocation chain length is the retry budget.
+   */
+  private scheduleRetry(
+    run: RunRecord,
+    attempt: AttemptRecord,
+    reason: "error" | "deadline",
+    errorMessage?: string,
+  ): void {
+    const now = this.deps.clock.now();
+    let exhausted = false;
+    const commit = this.deps.store.transaction((tx): AttemptRecord | "exhausted" | undefined => {
+      const current = this.fenceRun(tx, run, attempt);
+      if (!current) return undefined;
+      // Retain committed partial output as an interrupted assistant entry so
+      // a regenerated answer is never appended onto it as one stream.
       const live = tx.liveOutput.get(attempt.id);
       if (live && live.content.length > 0) {
         const entry = this.newEntry(tx, run, "assistant", live.content, attempt.id, {
@@ -451,37 +884,174 @@ export class RunDriver {
         });
         tx.liveOutput.clear(attempt.id);
       }
-      tx.attempts.update(attempt);
+      const chain = countInvocationChain(tx, attempt);
+      if (chain >= this.limits.maxModelAttempts) {
+        attempt.state = "failed";
+        attempt.errorCode = reason === "deadline" ? "MODEL_INTERRUPTED" : "MODEL_ERROR";
+        attempt.errorMessage =
+          reason === "deadline" ? "model attempt budget exhausted" : (errorMessage ?? "model request failed");
+        attempt.updatedAt = now;
+        tx.attempts.update(attempt);
+        const updated: RunRecord = {
+          ...current,
+          checkpoint: { ...current.checkpoint, activeAttempt: undefined },
+          updatedAt: now,
+        };
+        tx.runs.update(updated);
+        tx.changes.push({
+          kind: "attempt.update",
+          conversationId: run.conversationId,
+          value: projectAttempt(attempt),
+        });
+        tx.changes.push({
+          kind: "run.update",
+          conversationId: run.conversationId,
+          value: projectRun(updated),
+        });
+        exhausted = true;
+        return "exhausted";
+      }
+      // ADR-0002: backoff comes from pi-ai's policy helper with explicit
+      // runtime limits; the computed eligibility is persisted once.
+      const delayMs =
+        reason === "deadline"
+          ? 0
+          : retryDelayMs(
+              {
+                baseDelayMs: this.limits.retryBaseDelayMs,
+                maxAgentDelayMs: this.limits.retryMaxDelayMs,
+              },
+              chain,
+            );
+      const child = createRetryChild(tx, this.deps.ids, this.deps.clock.now(), {
+        parent: attempt,
+        run: current,
+        retryEligibleAt: now + delayMs,
+        errorCode: reason === "deadline" ? "MODEL_INTERRUPTED" : "MODEL_ERROR",
+        errorMessage:
+          reason === "deadline" ? "model attempt exceeded its budget" : (errorMessage ?? "model request failed"),
+      });
+      const updated: RunRecord = {
+        ...current,
+        checkpoint: {
+          ...current.checkpoint,
+          activeAttempt: { attemptId: child.id, kind: attempt.kind },
+        },
+        updatedAt: now,
+      };
+      tx.runs.update(updated);
       tx.changes.push({
         kind: "attempt.update",
         conversationId: run.conversationId,
         value: projectAttempt(attempt),
       });
+      tx.changes.push({
+        kind: "attempt.update",
+        conversationId: run.conversationId,
+        value: projectAttempt(child),
+      });
+      tx.changes.push({
+        kind: "run.update",
+        conversationId: run.conversationId,
+        value: projectRun(updated),
+      });
+      return child;
     });
     this.deps.publish(commit);
+    if (exhausted) {
+      this.applyTransition(run, {
+        type: "definite_failure",
+        code: reason === "deadline" ? "MODEL_INTERRUPTED" : "MODEL_ERROR",
+      });
+    }
+  }
 
-    if (canRetry) {
-      // Replacement attempt from the same valid context boundary.
-      const retry = {
-        ...attempt,
-        id: this.deps.ids.next("attempt"),
-        state: "prepared" as const,
-        parentAttemptId: attempt.id,
-        resultArtifactId: undefined,
-        uncertaintyJson: undefined,
-        errorCode: undefined,
-        errorMessage: undefined,
-        createdAt: this.deps.clock.now(),
+  /** Local cancellation of a dispatched attempt (ADR-0002). */
+  private settleLocalCancellation(run: RunRecord, attempt: AttemptRecord): void {
+    const commit = this.deps.store.transaction((tx) => {
+      const current = this.fenceRun(tx, run, attempt);
+      if (!current) return;
+      const live = tx.liveOutput.get(attempt.id);
+      if (live && live.content.length > 0) {
+        const entry = this.newEntry(tx, run, "assistant", live.content, attempt.id, {
+          interrupted: true,
+        });
+        tx.changes.push({
+          kind: "entry.append",
+          conversationId: run.conversationId,
+          value: projectEntry(entry),
+        });
+        tx.liveOutput.clear(attempt.id);
+      }
+      attempt.state = "failed";
+      attempt.errorCode = "MODEL_CANCELLED";
+      attempt.errorMessage = "cancelled";
+      attempt.updatedAt = this.deps.clock.now();
+      tx.attempts.update(attempt);
+      const updated: RunRecord = {
+        ...current,
+        checkpoint: { ...current.checkpoint, activeAttempt: undefined },
         updatedAt: this.deps.clock.now(),
       };
-      this.insertAttemptOnly(run, retry);
-      return;
-    }
-    if (reason === "cancelled") {
-      this.applyTransition(run, { type: "cancel_requested" });
-    } else {
-      this.applyTransition(run, { type: "definite_failure", code: "MODEL_FAILED" });
-    }
+      tx.runs.update(updated);
+      tx.changes.push({
+        kind: "attempt.update",
+        conversationId: run.conversationId,
+        value: projectAttempt(attempt),
+      });
+      tx.changes.push({
+        kind: "run.update",
+        conversationId: run.conversationId,
+        value: projectRun(updated),
+      });
+    });
+    this.deps.publish(commit);
+    this.applyTransition(run, { type: "cancel_requested" });
+  }
+
+  private settleModelFailure(
+    run: RunRecord,
+    attempt: AttemptRecord,
+    errorCode: string,
+    errorMessage: string,
+  ): void {
+    attempt.state = "failed";
+    attempt.errorCode = errorCode;
+    attempt.errorMessage = errorMessage;
+    attempt.updatedAt = this.deps.clock.now();
+    const commit = this.deps.store.transaction((tx) => {
+      const current = this.fenceRun(tx, run, attempt);
+      if (!current) return;
+      tx.attempts.update(attempt);
+      const updated: RunRecord = {
+        ...current,
+        checkpoint: { ...current.checkpoint, activeAttempt: undefined },
+        updatedAt: this.deps.clock.now(),
+      };
+      tx.runs.update(updated);
+      tx.changes.push({
+        kind: "attempt.update",
+        conversationId: run.conversationId,
+        value: projectAttempt(attempt),
+      });
+      tx.changes.push({
+        kind: "run.update",
+        conversationId: run.conversationId,
+        value: projectRun(updated),
+      });
+    });
+    this.deps.publish(commit);
+    this.applyTransition(run, { type: "definite_failure", code: errorCode });
+  }
+
+  private markAttemptState(
+    run: RunRecord,
+    attempt: AttemptRecord,
+    state: AttemptRecord["state"],
+  ): void {
+    attempt.state = state;
+    attempt.updatedAt = this.deps.clock.now();
+    this.updateAttempt(run, attempt);
   }
 
   // -------------------------------------------------------------------------
@@ -672,20 +1242,6 @@ export class RunDriver {
     this.deps.publish(commit);
   }
 
-  /** Insert a retry attempt that reuses its parent's request artifact. */
-  private insertAttemptOnly(run: RunRecord, attempt: AttemptRecord): void {
-    const commit = this.deps.store.transaction((tx) => {
-      if (!this.executionCurrent(tx, run)) return;
-      tx.attempts.insert(attempt);
-      tx.changes.push({
-        kind: "attempt.update",
-        conversationId: run.conversationId,
-        value: projectAttempt(attempt),
-      });
-    });
-    this.deps.publish(commit);
-  }
-
   private updateAttempt(run: RunRecord, attempt: AttemptRecord): void {
     const commit = this.deps.store.transaction((tx) => {
       if (!this.executionCurrent(tx, run, attempt)) return;
@@ -702,13 +1258,23 @@ export class RunDriver {
   /**
    * ADR-0001: a persistence boundary may only write while the conversation,
    * run, attempt, and execution generation still exist as expected.
+   * ADR-0002: returns the current run record so checkpoint patches apply to
+   * the latest persisted state instead of a stale in-memory copy.
    */
-  private executionCurrent(tx: StoreTransaction, run: RunRecord, attempt?: AttemptRecord): boolean {
-    if (!tx.conversations.get(run.conversationId)) return false;
+  private fenceRun(
+    tx: StoreTransaction,
+    run: RunRecord,
+    attempt?: AttemptRecord,
+  ): RunRecord | undefined {
+    if (!tx.conversations.get(run.conversationId)) return undefined;
     const currentRun = tx.runs.get(run.id);
-    if (!currentRun || currentRun.generation !== run.generation) return false;
-    if (attempt && !tx.attempts.get(attempt.id)) return false;
-    return true;
+    if (!currentRun || currentRun.generation !== run.generation) return undefined;
+    if (attempt && !tx.attempts.get(attempt.id)) return undefined;
+    return currentRun;
+  }
+
+  private executionCurrent(tx: StoreTransaction, run: RunRecord, attempt?: AttemptRecord): boolean {
+    return this.fenceRun(tx, run, attempt) !== undefined;
   }
 
   /** ADR-0001: discard in-memory execution state for a deleted run. */
@@ -796,6 +1362,29 @@ export class RunDriver {
       this.activeControllers.delete(runId);
     }
   }
+}
+
+/** The terminal model result payload linked to an attempt (ADR-0002). */
+export interface PersistedModelResult {
+  version: 1;
+  message: ModelAttemptResult["message"];
+}
+
+function textOf(message: ModelAttemptResult["message"]): string {
+  return message.content
+    .filter((block) => block.type === "text")
+    .map((block) => block.text)
+    .join("");
+}
+
+function toolCallsOf(message: ModelAttemptResult["message"]): PersistedModelToolCall[] {
+  const calls: PersistedModelToolCall[] = [];
+  for (const block of message.content) {
+    if (block.type === "toolCall") {
+      calls.push({ toolCallId: block.id, name: block.name, arguments: block.arguments });
+    }
+  }
+  return calls;
 }
 
 function renderToolResult(outcome: { content: { type: string; text?: string }[]; isError: boolean }): string {

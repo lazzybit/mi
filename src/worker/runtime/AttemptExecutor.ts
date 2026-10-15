@@ -1,15 +1,10 @@
-// External attempt execution (PLAN.md -> Execution engine -> AttemptExecutor).
+// External attempt execution (ADR-0002). The executor forwards deltas to the
+// output committer and returns the authoritative pi-ai terminal message; it
+// never reconstructs tool arguments or invents call identities.
 
+import type { AssistantMessage } from "@earendil-works/pi-ai";
 import type { AttemptId } from "../../shared/domain";
-import type {
-  CompletedModelTurn,
-  ModelAttemptResult,
-  ModelEvent,
-  ModelGateway,
-  ModelRequest,
-  PersistedModelToolCall,
-  ToolCallDelta,
-} from "../models/types";
+import type { ModelAttemptResult, ModelEvent, ModelGateway, ModelRequest } from "../models/types";
 import type { PreparedToolCall, ToolExecutionOutcome, ToolExecutor } from "../mcp/types";
 import type { OutputCommitter } from "./OutputCommitter";
 
@@ -21,6 +16,28 @@ export class AttemptAbortedError extends Error {
     super(message ?? `attempt aborted: ${reason}`);
     this.name = "AttemptAbortedError";
   }
+}
+
+/** Synthetic terminal message for a stream that ended without a terminal event. */
+export function failedAssistantMessage(errorMessage: string): AssistantMessage {
+  return {
+    role: "assistant",
+    content: [],
+    api: "unknown",
+    provider: "unknown",
+    model: "unknown",
+    usage: {
+      input: 0,
+      output: 0,
+      cacheRead: 0,
+      cacheWrite: 0,
+      totalTokens: 0,
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+    },
+    stopReason: "error",
+    errorMessage,
+    timestamp: Date.now(),
+  };
 }
 
 export class AttemptExecutor {
@@ -35,63 +52,26 @@ export class AttemptExecutor {
     request: ModelRequest,
     signal: AbortSignal,
   ): Promise<ModelAttemptResult> {
-    const toolCallBuffers = new Map<number, ToolCallDelta>();
-    let text = "";
-    let reasoning = "";
-    let completed: CompletedModelTurn | undefined;
-
+    let terminal: AssistantMessage | undefined;
     try {
       for await (const event of this.model.stream(request, signal)) {
         if (signal.aborted) throw abortError(signal);
-        switch (event.type) {
-          case "text_delta": {
-            text += event.text;
-            this.committer.append(attemptId, event.text);
-            break;
-          }
-          case "reasoning_delta": {
-            reasoning += event.text;
-            break;
-          }
-          case "tool_call_delta": {
-            const existing = toolCallBuffers.get(event.value.index) ?? { index: event.value.index };
-            toolCallBuffers.set(event.value.index, {
-              index: event.value.index,
-              id: event.value.id ?? existing.id,
-              name: event.value.name ?? existing.name,
-              argumentsDelta: (existing.argumentsDelta ?? "") + (event.value.argumentsDelta ?? ""),
-            });
-            break;
-          }
-          case "usage":
-          case "completed": {
-            if (event.type === "completed") completed = event.value;
-            break;
-          }
-          default: {
-            break;
-          }
-        }
+        const mapped = consumeEvent(event, this.committer, attemptId);
+        if (mapped) terminal = mapped;
       }
     } catch (error) {
       if (signal.aborted) throw abortError(signal);
-      throw error;
+      if (error instanceof AttemptAbortedError) throw error;
+      // ADR-0002: transport-level failures surface as terminal errors with
+      // the provider error text preserved for retry classification.
+      return { message: failedAssistantMessage(describe(error)) };
     }
-
-    if (!completed) {
-      throw new Error("model stream ended without a completed event");
+    if (!terminal) {
+      return {
+        message: failedAssistantMessage("model stream ended without a terminal event"),
+      };
     }
-    const toolCalls = completed.toolCalls.length > 0 ? completed.toolCalls : bufferedToolCalls(toolCallBuffers);
-    const result: ModelAttemptResult = {
-      text: completed.text || text,
-      toolCalls,
-    };
-    if (completed.native !== undefined) result.native = completed.native;
-    if (completed.usage !== undefined) result.usage = completed.usage;
-    if (reasoning) {
-      result.native = { ...(asRecord(result.native)), reasoning };
-    }
-    return result;
+    return terminal.usage ? { message: terminal, usage: terminal.usage } : { message: terminal };
   }
 
   async executeTool(call: PreparedToolCall, signal: AbortSignal): Promise<ToolExecutionOutcome> {
@@ -100,28 +80,28 @@ export class AttemptExecutor {
   }
 }
 
-function bufferedToolCalls(buffers: Map<number, ToolCallDelta>): PersistedModelToolCall[] {
-  return [...buffers.values()]
-    .sort((a, b) => a.index - b.index)
-    .map((buffer) => {
-      let parsed: unknown = {};
-      try {
-        parsed = buffer.argumentsDelta ? JSON.parse(buffer.argumentsDelta) : {};
-      } catch {
-        parsed = { _raw: buffer.argumentsDelta ?? "" };
-      }
-      return {
-        toolCallId: buffer.id ?? `call_${buffer.index}`,
-        name: buffer.name ?? "unknown",
-        arguments: parsed,
-      };
-    });
+function consumeEvent(
+  event: ModelEvent,
+  committer: OutputCommitter,
+  attemptId: AttemptId,
+): AssistantMessage | undefined {
+  switch (event.type) {
+    case "text_delta":
+      committer.append(attemptId, event.text);
+      return undefined;
+    case "thinking_delta":
+      // Thinking is not user-visible output; it is preserved in the terminal
+      // message's content blocks.
+      return undefined;
+    case "completed":
+      return event.message;
+    default:
+      return undefined;
+  }
 }
 
-function asRecord(value: unknown): Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : {};
+function describe(error: unknown): string {
+  return error instanceof Error ? error.message : "model request failed";
 }
 
 function abortError(signal: AbortSignal): AttemptAbortedError {

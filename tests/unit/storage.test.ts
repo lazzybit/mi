@@ -13,7 +13,7 @@ describe("SqlStore", () => {
   it("migrates from empty storage and records the schema version", () => {
     const { store } = newStore();
     const revision = store.read((tx) => tx.ownerState.read());
-    expect(revision.schemaVersion).toBe(2);
+    expect(revision.schemaVersion).toBe(3);
     expect(revision.revision).toBe(0);
   });
 

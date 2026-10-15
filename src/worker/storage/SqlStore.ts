@@ -35,7 +35,8 @@ import {
   projectSubmission,
 } from "./projections";
 import { projectConversationSummary } from "./ConversationProjection";
-import type { ModelProfile } from "../types";
+import type { StoredModelSettings } from "../context/ContextAssembler";
+import { defaultRouteSettings, listRouteViews, resolveRouteById } from "../models/ModelRoutes";
 
 export interface StoreTransaction {
   readonly ownerState: OwnerStateRepository;
@@ -74,7 +75,7 @@ export interface Commit<T> {
  */
 export function buildConfiguration(tx: StoreTransaction): ConfigurationStatusView {
   const settings = tx.settings.read();
-  const modelProfile = parseJson<ModelProfile | undefined>(settings.modelProfileJson, undefined);
+  const stored = parseJson<StoredModelSettings | undefined>(settings.modelProfileJson, undefined);
   const connectors = tx.mcpServers.list().map((record) => ({
     id: record.id,
     name: record.name,
@@ -99,10 +100,29 @@ export function buildConfiguration(tx: StoreTransaction): ConfigurationStatusVie
   const configuration: ConfigurationStatusView = {
     connectors,
     skills,
+    routes: listRouteViews(),
     settingsVersion: settings.settingsVersion,
     missing: [],
   };
-  if (modelProfile) configuration.model = modelProfile;
+  // ADR-0002: project route settings with server-resolved catalog metadata.
+  // Catalog prices and opaque metadata stay server-side.
+  if (stored && "profile" in stored) {
+    configuration.legacyModel = stored.profile;
+  } else {
+    const effective = stored ?? defaultRouteSettings();
+    const selection = resolveRouteById(effective.routeId);
+    configuration.model = {
+      kind: "route",
+      gatewayId: effective.gatewayId,
+      routeId: selection.routeId,
+      label: selection.modelName,
+      thinkingLevel: effective.thinkingLevel,
+      maxOutputTokens: effective.maxOutputTokens,
+      contextWindow: selection.contextWindow,
+      maxTokens: selection.maxTokens,
+      thinkingLevels: selection.thinkingLevels,
+    };
+  }
   if (settings.workspaceRoot) configuration.workspaceRoot = settings.workspaceRoot;
   return configuration;
 }
@@ -114,6 +134,7 @@ export class SqlStore {
     this.backend.transactionSync(() => {
       for (const statement of SCHEMA_STATEMENTS) this.backend.sql.exec(statement);
       migrateCommandReceiptOutcome(this.backend.sql);
+      migrateAttemptRetryEligibility(this.backend.sql);
       const ownerState = new OwnerStateRepository(this.backend.sql);
       const settings = new SettingsRepository(this.backend.sql);
       ownerState.ensure();
@@ -234,4 +255,11 @@ function migrateCommandReceiptOutcome(sql: SqlExecutor): void {
   const columns = all<{ name: string }>(sql, `PRAGMA table_info(command_receipts)`);
   if (columns.some((column) => column.name === "outcome")) return;
   run(sql, `ALTER TABLE command_receipts ADD COLUMN outcome TEXT NOT NULL DEFAULT 'accepted'`);
+}
+
+/** ADR-0002: idempotent backoff-eligibility column for existing stores. */
+function migrateAttemptRetryEligibility(sql: SqlExecutor): void {
+  const columns = all<{ name: string }>(sql, `PRAGMA table_info(attempts)`);
+  if (columns.some((column) => column.name === "retry_eligible_at")) return;
+  run(sql, `ALTER TABLE attempts ADD COLUMN retry_eligible_at INTEGER`);
 }

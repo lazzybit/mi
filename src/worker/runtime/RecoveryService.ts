@@ -1,11 +1,14 @@
 // Recovery of work interrupted by a new object generation
-// (PLAN.md -> Execution engine -> Recovery matrix).
+// (ADR-0002). Model retry bookkeeping follows the same invocation-chain
+// budget as the driver; prepared retries retain their persisted eligibility,
+// and ambiguous historical bookkeeping fails visibly instead of dispatching
+// duplicate roots.
 
-import type { ViewChange } from "../../shared/wire";
 import type { Commit, SqlStore } from "../storage/SqlStore";
 import type { AttemptRecord, RunRecord } from "../storage/records";
 import { projectAttempt, projectRun } from "../storage/projections";
 import type { Clock, IdGenerator } from "./Clock";
+import { countInvocationChain, createRetryChild } from "./RetryBookkeeping";
 import type { RuntimeLimits } from "./limits";
 
 export interface RecoverySummary {
@@ -40,8 +43,10 @@ export class RecoveryService {
       if (attempt.generation >= currentGeneration) continue;
       if (attempt.state === "prepared") {
         // Dispatch may proceed; network I/O is forbidden before `dispatched`
-        // is committed, so nothing was sent.
-        summary.recovered += 1;
+        // is committed, so nothing was sent. ADR-0002: prepared retries
+        // retain their persisted eligibility and become the run's active
+        // attempt so the driver dispatches them instead of new roots.
+        this.adoptPrepared(attempt, summary);
         continue;
       }
       const run = this.deps.store.read((tx) => tx.runs.get(attempt.runId));
@@ -52,6 +57,8 @@ export class RecoveryService {
         this.recoverTool(run, attempt, summary);
       }
     }
+
+    this.reconcileLegacyBookkeeping(summary);
 
     // Continue cancellation handling for runs that requested it.
     const active = this.deps.store.read((tx) => tx.runs.activeRuns());
@@ -64,17 +71,136 @@ export class RecoveryService {
     return summary;
   }
 
+  /**
+   * ADR-0002: point the run's active-attempt bookkeeping at a surviving
+   * prepared attempt. Missing pointers (legacy stores) are adopted when
+   * unambiguous; conflicting pointers fail visibly.
+   */
+  private adoptPrepared(attempt: AttemptRecord, summary: RecoverySummary): void {
+    if (attempt.kind !== "model" && attempt.kind !== "compaction") return;
+    const run = this.deps.store.read((tx) => tx.runs.get(attempt.runId));
+    if (!run) return;
+    if (
+      run.phase !== "request_model" &&
+      run.phase !== "compact_context" &&
+      run.checkpoint.activeAttempt === undefined
+    ) {
+      summary.recovered += 1;
+      return;
+    }
+    const pointer = run.checkpoint.activeAttempt;
+    if (pointer && pointer.attemptId !== attempt.id) {
+      this.markAmbiguous(run, attempt);
+      summary.unknown += 1;
+      return;
+    }
+    if (pointer) {
+      summary.recovered += 1;
+      return;
+    }
+    const commit = this.deps.store.transaction((tx) => {
+      const current = tx.runs.get(run.id);
+      if (!current) return;
+      const updated: RunRecord = {
+        ...current,
+        checkpoint: {
+          ...current.checkpoint,
+          activeAttempt: { attemptId: attempt.id, kind: attempt.kind },
+        },
+        updatedAt: this.deps.clock.now(),
+      };
+      tx.runs.update(updated);
+      tx.changes.push({
+        kind: "run.update",
+        conversationId: run.conversationId,
+        value: projectRun(updated),
+      });
+    });
+    this.deps.publish(commit);
+    summary.recovered += 1;
+  }
+
+  /**
+   * ADR-0002: legacy runs in a model phase without an active-attempt pointer
+   * are reconciled against their stored attempts. A single chain tail is
+   * adopted; ambiguous state fails visibly rather than dispatching duplicate
+   * roots or resetting retry limits.
+   */
+  private reconcileLegacyBookkeeping(summary: RecoverySummary): void {
+    const active = this.deps.store.read((tx) => tx.runs.activeRuns());
+    for (const run of active) {
+      if (run.checkpoint.activeAttempt !== undefined) continue;
+      if (run.state !== "running") continue;
+      if (run.phase !== "request_model" && run.phase !== "compact_context") continue;
+      const pending = this.deps.store.read((tx) =>
+        tx.attempts
+          .listForRun(run.id)
+          .filter(
+            (attempt) =>
+              (attempt.kind === "model" || attempt.kind === "compaction") &&
+              (attempt.state === "prepared" || attempt.state === "dispatched"),
+          ),
+      );
+      if (pending.length === 0) continue;
+      if (pending.length > 1) {
+        this.markAmbiguous(run, pending[pending.length - 1] as AttemptRecord);
+        summary.unknown += 1;
+        continue;
+      }
+      const attempt = pending[0];
+      if (!attempt) continue;
+      if (attempt.state === "prepared") {
+        this.adoptPrepared(attempt, summary);
+      } else {
+        this.recoverModel(run, attempt, summary);
+      }
+    }
+  }
+
+  /** ADR-0002: ambiguous historical bookkeeping becomes visible attention. */
+  private markAmbiguous(run: RunRecord, attempt: AttemptRecord): void {
+    const now = this.deps.clock.now();
+    const commit = this.deps.store.transaction((tx) => {
+      const current = tx.runs.get(run.id);
+      if (!current) return;
+      attempt.state = "unknown";
+      attempt.errorCode = "MODEL_STATE_CONFLICT";
+      attempt.errorMessage = "ambiguous pending model bookkeeping after reconstruction";
+      attempt.uncertaintyJson = JSON.stringify({
+        reason: "generation_restart",
+        arguments: null,
+        session: null,
+        knownOutput: null,
+      });
+      attempt.updatedAt = now;
+      tx.attempts.update(attempt);
+      const updated: RunRecord = { ...current, state: "needs_attention", updatedAt: now };
+      tx.runs.update(updated);
+      tx.changes.push({
+        kind: "attempt.update",
+        conversationId: run.conversationId,
+        value: projectAttempt(attempt),
+      });
+      tx.changes.push({
+        kind: "run.update",
+        conversationId: run.conversationId,
+        value: projectRun(updated),
+      });
+    });
+    this.deps.publish(commit);
+  }
+
   private recoverModel(run: RunRecord, attempt: AttemptRecord, summary: RecoverySummary): void {
     const now = this.deps.clock.now();
-    const changes: ViewChange[] = [];
-    const attemptsInRun = this.deps.store.read((tx) => tx.attempts.listForRun(run.id));
-    const modelCount = attemptsInRun.filter((a) => a.kind === attempt.kind).length;
-    const canRetry = modelCount < this.deps.limits.maxModelAttempts;
+    let retried = false;
+    let wrote = false;
     const commit = this.deps.store.transaction((tx) => {
-      attempt.state = canRetry ? "interrupted" : "failed";
-      attempt.errorCode = "MODEL_INTERRUPTED";
-      attempt.errorMessage = "interrupted by a new object generation";
-      attempt.updatedAt = now;
+      const current = tx.runs.get(run.id);
+      if (!current) return;
+      // ADR-0002: the interrupted dispatched attempt consumes its invocation
+      // chain budget, identical to the driver's accounting.
+      const chain = countInvocationChain(tx, attempt);
+      const canRetry = chain < this.deps.limits.maxModelAttempts;
       const live = tx.liveOutput.get(attempt.id);
       if (live && live.content.length > 0) {
         const sequence = tx.conversations.nextEntrySequence(run.conversationId);
@@ -91,40 +217,60 @@ export class RecoveryService {
         });
         tx.liveOutput.clear(attempt.id);
       }
-      tx.attempts.update(attempt);
-      changes.push({ kind: "attempt.update", conversationId: run.conversationId, value: projectAttempt(attempt) });
-
       if (canRetry) {
-        const retry: AttemptRecord = {
-          ...attempt,
-          id: this.deps.ids.next("attempt"),
-          state: "prepared",
-          errorCode: undefined,
-          errorMessage: undefined,
-          resultArtifactId: undefined,
-          parentAttemptId: attempt.id,
-          generation: attempt.generation,
-          createdAt: now,
+        // ADR-0002: the retry child is created atomically with the parent
+        // settlement; interrupted dispatched attempts retry immediately.
+        const retry = createRetryChild(tx, this.deps.ids, now, {
+          parent: attempt,
+          run: current,
+          retryEligibleAt: attempt.retryEligibleAt ?? now,
+          errorCode: "MODEL_INTERRUPTED",
+          errorMessage: "interrupted by a new object generation",
+        });
+        const updated: RunRecord = {
+          ...current,
+          checkpoint: {
+            ...current.checkpoint,
+            activeAttempt: { attemptId: retry.id, kind: attempt.kind },
+          },
           updatedAt: now,
         };
-        tx.attempts.insert(retry);
-        changes.push({ kind: "attempt.update", conversationId: run.conversationId, value: projectAttempt(retry) });
+        tx.runs.update(updated);
+        retried = true;
+        wrote = true;
+        tx.changes.push({ kind: "attempt.update", conversationId: run.conversationId, value: projectAttempt(attempt) });
+        tx.changes.push({ kind: "attempt.update", conversationId: run.conversationId, value: projectAttempt(retry) });
+        tx.changes.push({ kind: "run.update", conversationId: run.conversationId, value: projectRun(updated) });
       } else {
-        run.state = "failed";
-        run.phase = "finish_turn";
-        run.updatedAt = now;
-        tx.runs.update(run);
-        changes.push({ kind: "run.update", conversationId: run.conversationId, value: projectRun(run) });
+        attempt.state = "failed";
+        attempt.errorCode = "MODEL_INTERRUPTED";
+        attempt.errorMessage = "interrupted by a new object generation";
+        attempt.updatedAt = now;
+        tx.attempts.update(attempt);
+        const updated: RunRecord = {
+          ...current,
+          state: "failed",
+          phase: "finish_turn",
+          checkpoint: { ...current.checkpoint, activeAttempt: undefined },
+          updatedAt: now,
+        };
+        tx.runs.update(updated);
+        wrote = true;
+        tx.changes.push({ kind: "attempt.update", conversationId: run.conversationId, value: projectAttempt(attempt) });
+        tx.changes.push({ kind: "run.update", conversationId: run.conversationId, value: projectRun(updated) });
       }
     });
     this.deps.publish(commit);
-    if (canRetry) summary.retried += 1;
+    if (!wrote) {
+      summary.recovered += 1;
+      return;
+    }
+    if (retried) summary.retried += 1;
     else summary.recovered += 1;
   }
 
   private recoverTool(run: RunRecord, attempt: AttemptRecord, summary: RecoverySummary): void {
     const now = this.deps.clock.now();
-    const changes: ViewChange[] = [];
     const commit = this.deps.store.transaction((tx) => {
       if (attempt.replayPolicy === "safe") {
         attempt.state = "interrupted";
@@ -144,8 +290,8 @@ export class RecoveryService {
           updatedAt: now,
         };
         tx.attempts.insert(retry);
-        changes.push({ kind: "attempt.update", conversationId: run.conversationId, value: projectAttempt(attempt) });
-        changes.push({ kind: "attempt.update", conversationId: run.conversationId, value: projectAttempt(retry) });
+        tx.changes.push({ kind: "attempt.update", conversationId: run.conversationId, value: projectAttempt(attempt) });
+        tx.changes.push({ kind: "attempt.update", conversationId: run.conversationId, value: projectAttempt(retry) });
         summary.retried += 1;
       } else {
         // Unsafe: the remote outcome is unknown and must not be replayed.
@@ -161,12 +307,12 @@ export class RecoveryService {
         });
         attempt.updatedAt = now;
         tx.attempts.update(attempt);
-        changes.push({ kind: "attempt.update", conversationId: run.conversationId, value: projectAttempt(attempt) });
-        if (run.state !== "completed" && run.state !== "cancelled" && run.state !== "failed") {
-          run.state = "needs_attention";
-          run.updatedAt = now;
-          tx.runs.update(run);
-          changes.push({ kind: "run.update", conversationId: run.conversationId, value: projectRun(run) });
+        tx.changes.push({ kind: "attempt.update", conversationId: run.conversationId, value: projectAttempt(attempt) });
+        const current = tx.runs.get(run.id);
+        if (current && current.state !== "completed" && current.state !== "cancelled" && current.state !== "failed") {
+          const updated: RunRecord = { ...current, state: "needs_attention", updatedAt: now };
+          tx.runs.update(updated);
+          tx.changes.push({ kind: "run.update", conversationId: run.conversationId, value: projectRun(updated) });
         }
         summary.unknown += 1;
       }

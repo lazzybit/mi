@@ -10,6 +10,9 @@ export interface RuntimeLimits {
   outputFlushIntervalMs: number;
   maxModelAttempts: number;
   maxSafeToolRetries: number;
+  /** ADR-0002: driver-owned backoff policy for model retries. */
+  retryBaseDelayMs: number;
+  retryMaxDelayMs: number;
 }
 
 export const DEFAULT_RUNTIME_LIMITS: RuntimeLimits = {
@@ -20,4 +23,6 @@ export const DEFAULT_RUNTIME_LIMITS: RuntimeLimits = {
   outputFlushIntervalMs: 100,
   maxModelAttempts: 3,
   maxSafeToolRetries: 2,
+  retryBaseDelayMs: 1_000,
+  retryMaxDelayMs: 60_000,
 };

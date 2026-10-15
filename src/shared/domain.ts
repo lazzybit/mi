@@ -239,6 +239,35 @@ export interface ModelProfileView {
 
 export type ModelProtocol = "openai-responses" | "openai-chat-completions" | "anthropic-messages";
 
+/**
+ * ADR-0002: a repository-configured model route with catalog-derived display
+ * metadata. Users never supply provider protocols or token limits.
+ */
+export interface ModelRouteView {
+  routeId: string;
+  label: string;
+  provider: string;
+  modelId: string;
+  api: string;
+  contextWindow: number;
+  maxTokens: number;
+  thinkingLevels: string[];
+}
+
+/** The server-validated model settings projection (ADR-0002). */
+export interface ModelSettingsView {
+  kind: "route";
+  gatewayId: string;
+  routeId: string;
+  /** Catalog-derived display name of the resolved model. */
+  label: string;
+  thinkingLevel?: string;
+  maxOutputTokens?: number;
+  contextWindow: number;
+  maxTokens: number;
+  thinkingLevels: string[];
+}
+
 export type ConnectorAuthMode = "auto" | "none" | "oauth" | "header" | "cf-access";
 
 export interface ConnectorView {
@@ -265,7 +294,11 @@ export interface SkillView {
 }
 
 export interface ConfigurationStatusView {
-  model?: ModelProfileView;
+  /** ADR-0002: route-based model settings when configured. */
+  model?: ModelSettingsView;
+  /** Historical concrete model profile saved before ADR-0002. */
+  legacyModel?: ModelProfileView;
+  routes: ModelRouteView[];
   connectors: ConnectorView[];
   skills: SkillView[];
   workspaceRoot?: string;

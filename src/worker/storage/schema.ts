@@ -1,7 +1,7 @@
 // SQLite schema (PLAN.md -> Persistence and scheduling -> Stored records).
 // `migrate()` is idempotent; `SCHEMA_VERSION` is bumped when the shape changes.
 
-export const SCHEMA_VERSION = 2;
+export const SCHEMA_VERSION = 3;
 
 export const SCHEMA_STATEMENTS: readonly string[] = [
   `CREATE TABLE IF NOT EXISTS owner_state (
@@ -80,6 +80,7 @@ export const SCHEMA_STATEMENTS: readonly string[] = [
      remote_name TEXT,
      tool_call_id TEXT,
      parent_attempt_id TEXT,
+     retry_eligible_at INTEGER,
      uncertainty_json TEXT,
      error_code TEXT,
      error_message TEXT,

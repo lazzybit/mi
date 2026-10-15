@@ -74,6 +74,15 @@ export interface RunCheckpoint {
   assistantEntryId?: string;
   pendingToolCalls: PersistedToolCall[];
   nextToolIndex: number;
+  /** ADR-0002: active model/compaction attempt for the current invocation. */
+  activeAttempt?: ActiveAttemptPointer;
+  /** ADR-0002: compaction source range selected by the planner. */
+  compactionPlan?: { firstSequence: number; lastSequence: number; digest: string };
+}
+
+export interface ActiveAttemptPointer {
+  attemptId: AttemptId;
+  kind: AttemptKind;
 }
 
 export type RunPhase =
@@ -120,6 +129,8 @@ export interface AttemptRecord {
   remoteName?: string;
   toolCallId?: string;
   parentAttemptId?: AttemptId;
+  /** ADR-0002: persisted backoff eligibility; reconstruction never recomputes it. */
+  retryEligibleAt?: number;
   uncertaintyJson?: string;
   errorCode?: string;
   errorMessage?: string;

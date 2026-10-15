@@ -552,8 +552,8 @@ export class AttemptRepository {
       this.sql,
       `INSERT INTO attempts (id, run_id, conversation_id, kind, state, generation, request_artifact_id, result_artifact_id,
          replay_policy, connector_id, connector_version, catalog_version, tool_name, remote_name, tool_call_id,
-         parent_attempt_id, uncertainty_json, error_code, error_message, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         parent_attempt_id, retry_eligible_at, uncertainty_json, error_code, error_message, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       record.id,
       record.runId,
       record.conversationId,
@@ -570,6 +570,7 @@ export class AttemptRepository {
       record.remoteName ?? null,
       record.toolCallId ?? null,
       record.parentAttemptId ?? null,
+      record.retryEligibleAt ?? null,
       record.uncertaintyJson ?? null,
       record.errorCode ?? null,
       record.errorMessage ?? null,
@@ -623,13 +624,14 @@ export class AttemptRepository {
   update(record: AttemptRecord): void {
     run(
       this.sql,
-      `UPDATE attempts SET state = ?, result_artifact_id = ?, uncertainty_json = ?, error_code = ?, error_message = ?, updated_at = ?
+      `UPDATE attempts SET state = ?, result_artifact_id = ?, uncertainty_json = ?, error_code = ?, error_message = ?, retry_eligible_at = ?, updated_at = ?
        WHERE id = ?`,
       record.state,
       record.resultArtifactId ?? null,
       record.uncertaintyJson ?? null,
       record.errorCode ?? null,
       record.errorMessage ?? null,
+      record.retryEligibleAt ?? null,
       record.updatedAt,
       record.id,
     );
@@ -676,6 +678,7 @@ interface AttemptRow {
   remote_name: string | null;
   tool_call_id: string | null;
   parent_attempt_id: string | null;
+  retry_eligible_at: number | null;
   uncertainty_json: string | null;
   error_code: string | null;
   error_message: string | null;
@@ -702,6 +705,7 @@ function mapAttempt(row: AttemptRow | undefined): AttemptRecord | undefined {
     remoteName: row.remote_name ?? undefined,
     toolCallId: row.tool_call_id ?? undefined,
     parentAttemptId: row.parent_attempt_id ?? undefined,
+    retryEligibleAt: row.retry_eligible_at ?? undefined,
     uncertaintyJson: row.uncertainty_json ?? undefined,
     errorCode: row.error_code ?? undefined,
     errorMessage: row.error_message ?? undefined,

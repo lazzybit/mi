@@ -1,29 +1,27 @@
-// Default model gateway factory: the AI Gateway binding transport plus the
-// three provider codecs.
+// Default model gateway factory (ADR-0002). Production dispatches through the
+// AI binding, resolved lazily so ordinary Worker construction stays
+// credential-free. Browser acceptance points the same adapter at a local
+// fixture model service.
 
-import { AiBindingTransport } from "./AiBindingTransport";
-import { GatewayModelGateway } from "./GatewayModelGateway";
-import { HttpGatewayTransport } from "./HttpGatewayTransport";
-import { AnthropicMessagesCodec } from "./codecs/AnthropicMessagesCodec";
-import { OpenAIChatCodec } from "./codecs/OpenAIChatCodec";
-import { OpenAIResponsesCodec } from "./codecs/OpenAIResponsesCodec";
+import type { FetchFunction } from "@earendil-works/pi-ai";
+import { createAiBindingFetch } from "@earendil-works/pi-ai/api/cloudflare-ai-binding";
+import { GatewayModelGateway, type GatewayTransportBinding } from "./GatewayModelGateway";
 import type { ModelGateway } from "./types";
 
 export function createDefaultModelGateway(env: Env): ModelGateway {
-  const codecs = [
-    new OpenAIResponsesCodec(),
-    new OpenAIChatCodec(),
-    new AnthropicMessagesCodec(),
-  ];
-  // Browser acceptance points the gateway at a local fixture model service.
-  // The AI binding is still resolved lazily for production: accessing it
-  // eagerly requires remote bindings, which the local test runtime does not
-  // provide.
   const fixtureUrl = readFixtureModelUrl(env);
-  if (fixtureUrl) {
-    return new GatewayModelGateway(new HttpGatewayTransport(fixtureUrl), codecs);
+  const binding: GatewayTransportBinding = fixtureUrl
+    ? { fetch: () => fetch, baseUrlOverride: fixtureUrl }
+    : { fetch: () => resolveBindingFetch(env) };
+  return new GatewayModelGateway(binding);
+}
+
+function resolveBindingFetch(env: Env): FetchFunction {
+  const binding = env.AI as unknown as Parameters<typeof createAiBindingFetch>[0];
+  if (!binding || typeof binding.fetch !== "function") {
+    throw new Error("AI binding is not available in this environment");
   }
-  return new GatewayModelGateway(new AiBindingTransport(() => env.AI), codecs);
+  return createAiBindingFetch(binding);
 }
 
 function readFixtureModelUrl(env: Env): string | undefined {
@@ -31,5 +29,6 @@ function readFixtureModelUrl(env: Env): string | undefined {
   return typeof value === "string" && value.length > 0 ? value : undefined;
 }
 
-export { AiBindingTransport, GatewayModelGateway, HttpGatewayTransport };
-export { AnthropicMessagesCodec, OpenAIChatCodec, OpenAIResponsesCodec };
+export { GatewayModelGateway } from "./GatewayModelGateway";
+export { listRouteViews, resolveRouteById, DEFAULT_ROUTE_ID } from "./ModelRoutes";
+export type { ModelRouteSelection, ModelRouteView } from "./ModelRoutes";

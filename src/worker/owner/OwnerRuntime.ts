@@ -140,6 +140,7 @@ export class OwnerRuntime {
       listTools: (tx) => this.catalog.snapshot(tx),
       baseInstructions: deps.baseInstructions,
     });
+    const budget = new ContextBudget();
     const executor = new AttemptExecutor(deps.model, this.tools, committer);
     const wake = new WakeScheduler(deps.alarms);
 
@@ -149,6 +150,7 @@ export class OwnerRuntime {
       ids: this.ids,
       machine: new RunMachine(),
       context: assembler,
+      budget,
       executor,
       tools: this.tools,
       committer,

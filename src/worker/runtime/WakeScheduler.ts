@@ -24,7 +24,12 @@ export class WakeScheduler {
       if (current !== null) await this.alarms.deleteAlarm();
       return;
     }
-    await this.ensureWakeBy(nextRunnableAt);
+    // ADR-0002: the reconciled time is the next actionable moment, so a stale
+    // earlier wake is replaced, not just shortened.
+    const current = await this.alarms.getAlarm();
+    if (current === null || current !== nextRunnableAt) {
+      await this.alarms.setAlarm(nextRunnableAt);
+    }
   }
 }
 

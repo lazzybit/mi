@@ -4,6 +4,7 @@ import type { ModelEvent, ModelGateway, ModelRequest } from "../../src/worker/mo
 import { OutputCommitter } from "../../src/worker/runtime/OutputCommitter";
 import {
   FakeModelGateway,
+  assistantFixture,
   bootstrapConversation,
   createTestRuntime,
   envelope,
@@ -124,6 +125,12 @@ describe("model interruption", () => {
       (e) => e.kind === "assistant" && e.metadata?.interrupted === true,
     );
     expect(interrupted?.text).toBe("partial answer");
+    // ADR-0002: each replacement is actually dispatched when eligible.
+    for (let i = 0; i < 5; i++) {
+      const state = runtime.store.read((tx) => tx.runs.get(submitted.result.runId))?.state;
+      if (state === "failed") break;
+      await runtime.alarm();
+    }
     const attempts = runtime.store.read((tx) => tx.attempts.listForRun(submitted.result.runId));
     expect(attempts.some((a) => a.state === "interrupted")).toBe(true);
     expect(attempts.some((a) => a.parentAttemptId)).toBe(true);
@@ -278,7 +285,7 @@ class HangingModelGateway implements ModelGateway {
     yield { type: "text_delta", text: this.text };
     await new Promise((resolve) => setTimeout(resolve, 30));
     if (signal.aborted) throw new DOMException("aborted", "AbortError");
-    yield { type: "completed", value: { text: this.text, toolCalls: [] } };
+    yield { type: "completed", message: assistantFixture({ text: this.text }) };
   }
 }
 

@@ -9,7 +9,7 @@ function snapshot(): OwnerSnapshot {
   return {
     revision: 0,
     conversations: [],
-    configuration: { connectors: [], skills: [], settingsVersion: 0, missing: [] },
+    configuration: { routes: [], connectors: [], skills: [], settingsVersion: 0, missing: [] },
     selectedConversation: {
       conversation: { id: "c1", title: "One", createdAt: 1, updatedAt: 1 },
       entries: [],

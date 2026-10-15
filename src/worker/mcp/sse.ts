@@ -1,4 +1,4 @@
-// Server-sent events parser shared by the provider codecs.
+// Server-sent events parser for MCP streamable HTTP responses (ADR-0002: this is an MCP transport concern, not part of the model boundary).
 
 export interface SseEvent {
   event?: string;

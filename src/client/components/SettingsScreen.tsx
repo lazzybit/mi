@@ -27,7 +27,12 @@ export function SettingsScreen(props: {
         </button>
       </nav>
       {tab() === "model" && (
-        <ModelSettingsForm model={props.configuration.model} dispatch={props.dispatch} />
+        <ModelSettingsForm
+          model={props.configuration.model}
+          routes={props.configuration.routes}
+          legacyModel={props.configuration.legacyModel}
+          dispatch={props.dispatch}
+        />
       )}
       {tab() === "connectors" && (
         <McpConnectionList connectors={props.configuration.connectors} dispatch={props.dispatch} />

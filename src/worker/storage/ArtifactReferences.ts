@@ -85,8 +85,9 @@ export function collectSurvivingReferences(
 }
 
 /**
- * Entry metadata carries both tool-call display arguments and the assistant
- * tool-call history sent to the model. Both are supported representations.
+ * Entry metadata carries tool-call display arguments, the legacy assistant
+ * tool-call history, and (ADR-0002) the canonical pi-ai assistant message.
+ * All established representations are supported.
  */
 function collectEntryMetadataReferences(entry: EntryRecord, out: Set<string>): void {
   if (!entry.metadataJson) return;
@@ -100,6 +101,19 @@ function collectEntryMetadataReferences(entry: EntryRecord, out: Set<string>): v
       if (!isRecord(call)) continue;
       if (call.name === READ_TOOL_RESULT || call.alias === READ_TOOL_RESULT) {
         addReadToolResultArgument(call.arguments, out);
+      }
+    }
+  }
+  // ADR-0002: canonical assistant content (pi-ai ToolCall blocks).
+  const stored = metadata.modelMessage;
+  if (isRecord(stored) && isRecord(stored.message)) {
+    const content = stored.message.content;
+    if (Array.isArray(content)) {
+      for (const block of content) {
+        if (!isRecord(block) || block.type !== "toolCall") continue;
+        if (block.name === READ_TOOL_RESULT) {
+          addReadToolResultArgument(block.arguments, out);
+        }
       }
     }
   }

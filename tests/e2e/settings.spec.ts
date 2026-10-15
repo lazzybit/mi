@@ -3,12 +3,14 @@ import { addFixtureConnector, openOwner, saveModel } from "./fixture/app";
 
 test("model settings survive a reload", async ({ page, context }, testInfo) => {
   await openOwner(page, context, `owner-${testInfo.testId}`);
-  await saveModel(page, "fixture-model");
+  await saveModel(page);
 
   await page.reload();
   await expect(page.getByRole("button", { name: "New conversation" })).toBeVisible({ timeout: 90_000 });
   await page.getByRole("button", { name: "Settings" }).click();
-  await expect(page.getByLabel("Model", { exact: true })).toHaveValue("fixture-model");
+  // ADR-0002: the configured route selection persists across reloads.
+  await expect(page.getByLabel("Model route")).toHaveValue("dynamic/runner");
+  await expect(page.getByLabel("Gateway id")).toHaveValue("default");
 });
 
 test("a connector is discovered, connected, and persisted", async ({ page, context }, testInfo) => {
