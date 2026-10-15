@@ -1,199 +1,137 @@
 import { describe, expect, it } from "vitest";
-import { AppError, appErrorFromApi, type CommandFunctionOutcome, type OwnerSnapshot } from "../../src/shared/domain";
-import { applyChanges } from "../../src/client/sync/ConversationReducer";
-import { CommandOutbox } from "../../src/client/commands/CommandOutbox";
-import { CommandDispatcher } from "../../src/client/commands/CommandDispatcher";
+import type { ConversationView, EntryRecord } from "@earendil-works/pi-durable";
+import {
+  liveSummary,
+  queuedInputs,
+  transcriptEntries,
+} from "../../src/client/view";
+import { PendingSubmissionStore } from "../../src/client/pending/PendingSubmissions";
 import { DraftStore } from "../../src/client/storage/DraftStore";
 
-function snapshot(): OwnerSnapshot {
+function view(entries: EntryRecord[], docs: Record<string, unknown> = {}): ConversationView {
   return {
-    revision: 0,
-    conversations: [],
-    configuration: { routes: [], connectors: [], skills: [], settingsVersion: 0, missing: [] },
-    selectedConversation: {
-      conversation: { id: "c1", title: "One", createdAt: 1, updatedAt: 1 },
-      entries: [],
-      queuedInputs: [],
-    },
+    conversation: { id: 1 } as ConversationView["conversation"],
+    entries,
+    docs: docs as ConversationView["docs"],
   };
 }
 
-describe("ConversationReducer", () => {
-  it("appends entries and upserts conversations", () => {    const next = applyChanges(snapshot(), [
-      {
-        kind: "conversation.upsert",
-        value: { id: "c1", title: "One", createdAt: 1, updatedAt: 2, queuedCount: 0 },
-      },
-      {
-        kind: "entry.append",
-        conversationId: "c1",
-        value: { id: "e1", conversationId: "c1", sequence: 1, kind: "user", text: "hi", createdAt: 1 },
-      },
-    ]);
-    expect(next.conversations[0]?.updatedAt).toBe(2);
-    expect(next.selectedConversation?.entries[0]?.text).toBe("hi");
-  });
+function user(id: number, text: string): EntryRecord {
+  return {
+    id: id as EntryRecord["id"],
+    conversationId: 1 as EntryRecord["conversationId"],
+    kind: "pi.user",
+    model: [{ role: "user", content: text, timestamp: 1 }],
+  } as unknown as EntryRecord;
+}
 
-  it("replaces the inbox and clears a terminal run", () => {
-    const next = applyChanges(snapshot(), [
+function assistant(id: number, text: string): EntryRecord {
+  return {
+    id: id as EntryRecord["id"],
+    conversationId: 1 as EntryRecord["conversationId"],
+    kind: "pi.assistant",
+    model: [
       {
-        kind: "inbox.replace",
-        conversationId: "c1",
-        values: [
-          {
-            id: "s1",
-            conversationId: "c1",
-            mode: "queue",
-            content: "later",
-            state: "queued",
-            ownerSequence: 1,
-            createdAt: 1,
+        role: "assistant",
+        content: [{ type: "text", text }],
+        api: "openai-completions",
+        provider: "gateway",
+        model: "dynamic/runner",
+        usage: {},
+        stopReason: "stop",
+        timestamp: 1,
+      },
+    ],
+  } as unknown as EntryRecord;
+}
+
+function toolResult(id: number, toolName: string, text: string, isError = false): EntryRecord {
+  return {
+    id: id as EntryRecord["id"],
+    conversationId: 1 as EntryRecord["conversationId"],
+    kind: "pi.tool-result",
+    model: [
+      {
+        role: "toolResult",
+        toolCallId: "call-1",
+        toolName,
+        content: [{ type: "text", text }],
+        isError,
+        timestamp: 1,
+      },
+    ],
+  } as unknown as EntryRecord;
+}
+
+describe("transcript projection", () => {
+  it("maps committed entries and the live partial into display entries", () => {
+    const entries = transcriptEntries(
+      view(
+        [user(1, "hello"), assistant(2, "hi there"), toolResult(3, "echo", "echo: hi")],
+        {
+          "pi.live": {
+            generation: {
+              attempt: 1,
+              message: {
+                role: "assistant",
+                content: [{ type: "text", text: "partial" }],
+                api: "openai-completions",
+                provider: "gateway",
+                model: "dynamic/runner",
+                usage: {},
+                stopReason: "stop",
+                timestamp: 1,
+              },
+            },
           },
-        ],
-      },
-      {
-        kind: "run.update",
-        conversationId: "c1",
-        value: {
-          id: "r1",
-          conversationId: "c1",
-          state: "completed",
-          phase: "finish_turn",
-          turnNumber: 1,
-          createdAt: 1,
-          updatedAt: 2,
         },
-      },
+      ),
+    );
+    expect(entries.map((entry) => entry.kind)).toEqual([
+      "user",
+      "assistant",
+      "tool_result",
+      "assistant",
     ]);
-    expect(next.selectedConversation?.queuedInputs).toHaveLength(1);
-    expect(next.selectedConversation?.activeRun).toBeUndefined();
+    expect(entries[0]?.text).toBe("hello");
+    expect(entries[2]?.toolName).toBe("echo");
+    expect(entries[3]?.streaming).toBe(true);
   });
 
-  it("clears the selected snapshot when its conversation is removed", () => {
-    const next = applyChanges(snapshot(), [
-      { kind: "conversation.remove", conversationId: "c1" },
-    ]);
-    expect(next.conversations).toHaveLength(0);
-    expect(next.selectedConversation).toBeUndefined();
-  });
+  it("reports queued inputs and live run state", () => {
+    const queued = queuedInputs(
+      view([], {
+        "pi.inbox": { items: [{ id: 7, mode: "followUp", content: "later" }] },
+        "pi.live": { run: { taskId: 1, inputs: [7] }, generation: { attempt: 2 } },
+      }),
+    );
+    expect(queued).toHaveLength(1);
+    expect(queued[0]?.mode).toBe("followUp");
+    expect(queued[0]?.text).toBe("later");
 
-  it("preserves the selected snapshot when another conversation is removed", () => {
-    const base = snapshot();
-    base.conversations = [{ id: "c1", title: "One", createdAt: 1, updatedAt: 1, queuedCount: 0 }];
-    const next = applyChanges(base, [
-      { kind: "conversation.remove", conversationId: "c2" },
-    ]);
-    expect(next.selectedConversation?.conversation.id).toBe("c1");
+    const summary = liveSummary(
+      view([], { "pi.live": { run: { taskId: 1, inputs: [] }, generation: { attempt: 2 } } }),
+    );
+    expect(summary.active).toBe(true);
+    expect(summary.attempt).toBe(2);
   });
 });
 
-describe("CommandOutbox and CommandDispatcher", () => {
-  it("accepts once and clears the outbox", async () => {
-    const outbox = new CommandOutbox();
-    let calls = 0;
-    const dispatcher = new CommandDispatcher(outbox, {
-      "conversation.create": async (command) => {
-        calls += 1;
-        return { commandId: command.commandId, revision: 1, result: { conversationId: "c1" } };
-      },
-    });
-    const command = dispatcher.newCommand("conversation.create", {});
-    const result = await dispatcher.dispatch(command);
-    expect(result.status).toBe("accepted");
-    expect(calls).toBe(1);
-    expect(await outbox.pending()).toHaveLength(0);
+describe("PendingSubmissionStore", () => {
+  it("tracks a submission until it is acknowledged", () => {
+    const store = new PendingSubmissionStore();
+    store.add({ requestId: "r1", conversationId: "c1", text: "hi", whenBusy: "followUp", createdAt: 1 });
+    expect(store.list("c1")).toHaveLength(1);
+    store.remove("r1");
+    expect(store.list("c1")).toHaveLength(0);
   });
 
-  it("keeps a command pending after a transport failure so it can be resent", async () => {
-    const outbox = new CommandOutbox();
-    let attempts = 0;
-    const dispatcher = new CommandDispatcher(outbox, {
-      "submission.submit": async (command) => {
-        attempts += 1;
-        if (attempts === 1) throw new Error("network down");
-        return { commandId: command.commandId, revision: 1, result: {} };
-      },
-    });
-    const command = dispatcher.newCommand("submission.submit", { text: "hi" });
-    const first = await dispatcher.dispatch(command);
-    expect(first.status).toBe("retry");
-    expect(await outbox.pending()).toHaveLength(1);
-
-    // The same logical command id is resent through the current reference.
-    const results = await dispatcher.flush();
-    expect(results[0]?.status).toBe("accepted");
-    expect(await outbox.pending()).toHaveLength(0);
-  });
-
-  it("drops a command on a definitive application rejection", async () => {
-    const outbox = new CommandOutbox();
-    const dispatcher = new CommandDispatcher(outbox, {
-      "skill.create": async () => {
-        throw new AppError("INVALID_INPUT", "bad skill");
-      },
-    });
-    const command = dispatcher.newCommand("skill.create", {});
-    const result = await dispatcher.dispatch(command);
-    expect(result.status).toBe("rejected");
-    expect(await outbox.pending()).toHaveLength(0);
-  });
-
-  it("keeps unauthenticated commands pending for a later login", async () => {
-    const outbox = new CommandOutbox();
-    const dispatcher = new CommandDispatcher(outbox, {
-      "conversation.create": async () => {
-        throw new AppError("UNAUTHENTICATED", "login required");
-      },
-    });
-    const command = dispatcher.newCommand("conversation.create", {});
-    const result = await dispatcher.dispatch(command);
-    expect(result.status).toBe("retry");
-    expect(await outbox.pending()).toHaveLength(1);
-  });
-
-  it("drops a definitive deletion rejection from the outbox", async () => {
-    const outbox = new CommandOutbox();
-    const dispatcher = new CommandDispatcher(outbox, {
-      "conversation.delete": async () => {
-        throw new AppError("CONFLICT", "conversation has active work", false);
-      },
-    });
-    const command = dispatcher.newCommand("conversation.delete", { conversationId: "c1" });
-    const result = await dispatcher.dispatch(command);
-    expect(result.status).toBe("rejected");
-    expect(await outbox.pending()).toHaveLength(0);
-  });
-
-  it("keeps an uncertain deletion with its command id for retry", async () => {
-    const outbox = new CommandOutbox();
-    const dispatcher = new CommandDispatcher(outbox, {
-      "conversation.delete": async () => {
-        throw new Error("network down");
-      },
-    });
-    const command = dispatcher.newCommand("conversation.delete", { conversationId: "c1" });
-    const result = await dispatcher.dispatch(command);
-    expect(result.status).toBe("retry");
-    const pending = await outbox.pending();
-    expect(pending).toHaveLength(1);
-    expect(pending[0]?.commandId).toBe(command.commandId);
-    expect(pending[0]?.target?.conversationId).toBe("c1");
-  });
-});
-
-describe("server-function outcome boundary", () => {
-  it("reconstructs a browser-local AppError from a serialized rejection", () => {
-    const outcome: CommandFunctionOutcome<void> = {
-      ok: false,
-      error: { code: "CONFLICT", message: "conversation has active work", retryable: false },
-    };
-    // The envelope is plain JSON across the boundary.
-    const roundTripped = JSON.parse(JSON.stringify(outcome)) as CommandFunctionOutcome<void>;
-    if (roundTripped.ok) throw new Error("expected a rejection");
-    const error = appErrorFromApi(roundTripped.error);
-    expect(error).toBeInstanceOf(AppError);
-    expect(error.code).toBe("CONFLICT");
-    expect(error.retryable).toBe(false);
+  it("clears every pending submission for a deleted conversation", () => {
+    const store = new PendingSubmissionStore();
+    store.add({ requestId: "r1", conversationId: "c1", text: "one", whenBusy: "followUp", createdAt: 1 });
+    store.add({ requestId: "r2", conversationId: "c2", text: "two", whenBusy: "followUp", createdAt: 2 });
+    store.clearConversation("c1");
+    expect(store.list().map((entry) => entry.requestId)).toEqual(["r2"]);
   });
 });
 
@@ -204,14 +142,5 @@ describe("DraftStore", () => {
     expect(store.get("c1")).toBe("hello");
     store.clear("c1");
     expect(store.get("c1")).toBe("");
-  });
-
-  it("enumerates drafts for reconnect cleanup", () => {
-    const store = new DraftStore();
-    store.set("c1", "one");
-    store.set("c2", "two");
-    expect(store.list().map((entry) => entry.conversationId).sort()).toEqual(["c1", "c2"]);
-    store.clear("c1");
-    expect(store.list().map((entry) => entry.conversationId)).toEqual(["c2"]);
   });
 });

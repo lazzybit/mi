@@ -3,19 +3,21 @@
 // Worker entry, so the marker string `$$moduleUrl` is kept in this comment:
 // the transform skips any module that already mentions it, and this entry does
 // not use `lazy()` (the only consumer of that export).
-import { handleRequest } from "virtual:solid-ssr-handler";
-import { AppError, ownerKey } from "../shared/domain";
-import { verifyAccess } from "./auth/verifyRequest";
-import { runWithWorkerEnv } from "./context/WorkerEnv";
-import { OwnerObject } from "./owner/OwnerObject";
+//
+// The Worker entry is the only authenticated request boundary (ADR-0003).
+//
+// It verifies access, then either serves catalog operations through the Solid
+// server-function handler or forwards a selected-session WebSocket to the
+// session object. There is no owner Durable Object and no owner WebSocket.
 
-// M0-T01: the Worker entry exposes both the Solid server-function handler and
-// the OwnerObject Durable Object class. Selected approach (recorded in
-// docs/mvp/TASK.md): a thin authored Worker entry that imports the Solid
-// handler virtual modules and exports the Durable Object class. `handleRequest`
-// is re-exported because the Solid client-mode build prerenders the shell by
-// importing the built server bundle and calling it.
-export { OwnerObject, handleRequest };
+import { handleRequest } from "virtual:solid-ssr-handler";
+import { AppError, ownerKey, type OwnerIdentity } from "../shared/domain";
+import { verifyAccess, type VerifiedAccessAssertion } from "./auth/verifyRequest";
+import { runWithWorkerEnv } from "./context/WorkerEnv";
+import { CatalogStore } from "./owner/CatalogStore";
+import { SessionObject, sessionAddress } from "./session/SessionObject";
+
+export { SessionObject, handleRequest };
 
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
@@ -27,42 +29,81 @@ async function route(request: Request, env: Env): Promise<Response> {
   const url = new URL(request.url);
 
   // Route the server-function endpoint through the Solid handler so the
-  // authentication middleware chain runs for it (the standalone
-  // `handleServerFunctionRequest` would bypass middleware).
+  // authentication middleware chain runs for it.
   if (url.pathname === "/_server" || url.pathname.startsWith("/_server/")) {
     return handleRequest(request);
   }
 
-  if (url.pathname === "/oauth/client-metadata.json") {
-    return clientMetadata(env);
+  if (url.pathname === "/ws") {
+    return sessionRoute(request, env);
   }
 
-  if (
-    url.pathname === "/api/mcp/oauth/callback" ||
-    url.pathname === "/ws" ||
-    url.pathname === "/__fixture/evict"
-  ) {
-    return ownerRoute(request, env);
+  // Browser-acceptance only: the fixture routes exist only when the fixture
+  // model URL is configured. They are authenticated exactly like `/ws`.
+  if (url.pathname.startsWith("/__fixture/")) {
+    return fixtureRoute(request, env);
   }
 
   return env.ASSETS.fetch(request);
 }
 
-async function ownerRoute(request: Request, env: Env): Promise<Response> {
+async function sessionRoute(request: Request, env: Env): Promise<Response> {
   let verified;
   try {
     verified = await verifyAccess(request, env);
   } catch (error) {
-    const appError =
-      error instanceof AppError ? error : new AppError("UNAUTHENTICATED", "authentication failed");
-    return Response.json({ error: appError.toApiError() }, { status: 401 });
+    return unauthorized(error);
   }
-  const id = env.OWNER.idFromName(ownerKey(verified.owner));
-  const stub = env.OWNER.get(id);
+  return forwardToSession(request, env, verified);
+}
+
+async function fixtureRoute(request: Request, env: Env): Promise<Response> {
+  if (readFixtureModelUrl(env) === undefined) {
+    return new Response("not found", { status: 404 });
+  }
+  let verified;
+  try {
+    verified = await verifyAccess(request, env);
+  } catch (error) {
+    return unauthorized(error);
+  }
+  return forwardToSession(request, env, verified);
+}
+
+async function forwardToSession(
+  request: Request,
+  env: Env,
+  verified: VerifiedAccessAssertion,
+): Promise<Response> {
+  const url = new URL(request.url);
+  const conversationId = url.searchParams.get("conversationId");
+  if (!conversationId) {
+    return Response.json(
+      { error: { code: "INVALID_INPUT", message: "conversationId is required", retryable: false } },
+      { status: 400 },
+    );
+  }
+
+  const key = ownerKey(verified.owner);
+  const row = await new CatalogStore(env.DB).get(key, conversationId);
+  if (!row) {
+    return Response.json(
+      { error: { code: "NOT_FOUND", message: "conversation not found", retryable: false } },
+      { status: 404 },
+    );
+  }
+  if (row.lifecycle !== "active") {
+    return Response.json(
+      { error: { code: "CONFLICT", message: "conversation is not active", retryable: false } },
+      { status: 409 },
+    );
+  }
+
+  const stub = env.SESSION.get(env.SESSION.idFromName(sessionAddress(key, conversationId)));
   const headers = new Headers(request.headers);
-  headers.set("x-mi-owner", ownerKey(verified.owner));
+  headers.set("x-mi-owner", key);
   headers.set("x-mi-auth-exp", String(verified.expiresAt));
-  headers.set("x-mi-assertion", verified.assertion);
+  headers.set("x-mi-conversation", conversationId);
   const forwarded = new Request(request.url, {
     method: request.method,
     headers,
@@ -71,17 +112,16 @@ async function ownerRoute(request: Request, env: Env): Promise<Response> {
   return stub.fetch(forwarded);
 }
 
-function clientMetadata(env: Env): Response {
-  const metadata = {
-    client_id: env.OAUTH_CLIENT_METADATA_URL,
-    client_name: "mi",
-    redirect_uris: [`${new URL(env.OAUTH_CLIENT_METADATA_URL).origin}/api/mcp/oauth/callback`],
-    grant_types: ["authorization_code", "refresh_token"],
-    response_types: ["code"],
-    token_endpoint_auth_method: "none",
-    application_type: "web",
-  };
-  return Response.json(metadata, {
-    headers: { "cache-control": "public, max-age=3600" },
-  });
+function unauthorized(error: unknown): Response {
+  const appError =
+    error instanceof AppError ? error : new AppError("UNAUTHENTICATED", "authentication failed");
+  return Response.json({ error: appError.toApiError() }, { status: 401 });
 }
+
+function readFixtureModelUrl(env: Env): string | undefined {
+  const value = (env as unknown as Record<string, unknown>).MI_FIXTURE_MODEL_URL;
+  return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
+export type { OwnerIdentity };
+export { ownerKey };

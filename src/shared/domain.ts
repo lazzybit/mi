@@ -1,25 +1,19 @@
-// Shared domain contracts (PLAN.md -> Architecture -> Shared contracts).
-// Persistence internals and credentials never appear here.
+// Shared domain contracts (ADR-0003).
+//
+// mi manages user-visible conversations and coordinates peripheral
+// capabilities. Agent execution and its authoritative state belong to
+// pi-durable; this module keeps only the owner identity, the D1 catalog
+// projection, and the model-route settings the Worker validates.
 
 export type ConversationId = string;
-export type SubmissionId = string;
-export type RunId = string;
-export type AttemptId = string;
-export type ConnectorId = string;
-export type SkillId = string;
-export type ArtifactId = string;
 export type CommandId = string;
-export type EntryId = string;
-export type ContextSnapshotId = string;
-export type CredentialId = string;
-export type OAuthTransactionId = string;
 
 export interface OwnerIdentity {
   issuer: string;
   subject: string;
 }
 
-/** Canonical `issuer|subject` form used for Durable Object naming and digests. */
+/** Canonical `issuer|subject` form used for D1 scoping and session addresses. */
 export function ownerKey(owner: OwnerIdentity): string {
   return `${owner.issuer}|${owner.subject}`;
 }
@@ -31,7 +25,6 @@ export interface CommandEnvelope<T> {
 
 export interface CommandReceipt<T> {
   commandId: CommandId;
-  revision: number;
   result: T;
 }
 
@@ -40,56 +33,9 @@ export interface CommandReceipt<T> {
  * Solid server-function boundary may not preserve thrown `AppError`
  * instances, so the adapter reconstructs one on the client.
  */
-export type CommandFunctionOutcome<T> =
-  | { ok: true; receipt: CommandReceipt<T> }
+export type ActionResult =
+  | { ok: true }
   | { ok: false; error: ApiError };
-
-export type RunState =
-  | "queued"
-  | "running"
-  | "waiting_for_auth"
-  | "needs_attention"
-  | "completed"
-  | "cancelled"
-  | "failed";
-
-export const TERMINAL_RUN_STATES: readonly RunState[] = ["completed", "cancelled", "failed"];
-
-export function isTerminalRunState(state: RunState): boolean {
-  return TERMINAL_RUN_STATES.includes(state);
-}
-
-export type AttemptState =
-  | "prepared"
-  | "dispatched"
-  | "succeeded"
-  | "failed"
-  | "interrupted"
-  | "unknown";
-
-export type AttemptKind = "model" | "tool" | "compaction";
-
-export type SubmissionMode = "queue" | "steer";
-export type ReplayPolicy = "safe" | "unsafe";
-
-export interface SubmitInput {
-  conversationId: ConversationId;
-  text: string;
-  mode: SubmissionMode;
-}
-
-export interface SubmitResult {
-  submissionId: SubmissionId;
-  runId: RunId;
-  state: "queued" | "joined";
-}
-
-export interface ResolveAttemptInput {
-  attemptId: AttemptId;
-  action: "accept_observed_state" | "abandon" | "retry";
-  explanation: string;
-  evidenceArtifactIds: ArtifactId[];
-}
 
 export type ApiErrorCode =
   | "INVALID_INPUT"
@@ -97,9 +43,7 @@ export type ApiErrorCode =
   | "NOT_FOUND"
   | "CONFLICT"
   | "NOT_CONFIGURED"
-  | "AUTH_REQUIRED"
-  | "CONNECTOR_UNAVAILABLE"
-  | "REMOTE_OUTCOME_UNKNOWN";
+  | "NOT_READY";
 
 export interface ApiError {
   code: ApiErrorCode;
@@ -133,109 +77,23 @@ export function appErrorFromApi(api: ApiError): AppError {
 }
 
 // ---------------------------------------------------------------------------
-// Display / projection types (separate from persistence records)
+// Owner catalog (D1)
 // ---------------------------------------------------------------------------
 
-export type ConversationTitle = string;
+/** Lifecycle of a managed conversation row. */
+export type ConversationLifecycle = "creating" | "active" | "deleting";
 
-export interface ConversationView {
+export interface ConversationSummary {
   id: ConversationId;
-  title: ConversationTitle;
+  title: string;
+  lifecycle: ConversationLifecycle;
   createdAt: number;
   updatedAt: number;
 }
 
-export interface ConversationSummaryView extends ConversationView {
-  activeRunState?: RunState;
-  lastEntryPreview?: string;
-  queuedCount: number;
-}
-
-export type TranscriptEntryKind =
-  | "user"
-  | "assistant"
-  | "tool_call"
-  | "tool_result"
-  | "system"
-  | "summary"
-  | "notice";
-
-export interface TranscriptEntryView {
-  id: EntryId;
-  conversationId: ConversationId;
-  sequence: number;
-  kind: TranscriptEntryKind;
-  createdAt: number;
-  attemptId?: AttemptId;
-  text?: string;
-  /** Artifact reference for large or structured content. */
-  artifactId?: ArtifactId;
-  toolName?: string;
-  toolCallId?: string;
-  isError?: boolean;
-  streaming?: boolean;
-  metadata?: Record<string, unknown>;
-}
-
-export interface AttemptView {
-  id: AttemptId;
-  runId: RunId;
-  conversationId: ConversationId;
-  kind: AttemptKind;
-  state: AttemptState;
-  replayPolicy: ReplayPolicy;
-  toolName?: string;
-  remoteName?: string;
-  createdAt: number;
-  updatedAt: number;
-  errorCode?: string;
-  errorMessage?: string;
-  resultArtifactId?: ArtifactId;
-}
-
-export interface RunView {
-  id: RunId;
-  conversationId: ConversationId;
-  state: RunState;
-  phase: string;
-  turnNumber: number;
-  createdAt: number;
-  updatedAt: number;
-  cancelRequestedAt?: number;
-}
-
-export interface SubmissionView {
-  id: SubmissionId;
-  conversationId: ConversationId;
-  mode: SubmissionMode;
-  content: string;
-  state: SubmissionState;
-  runId?: RunId;
-  ownerSequence: number;
-  createdAt: number;
-}
-
-export type SubmissionState = "queued" | "steering" | "accepted" | "withdrawn" | "rejected";
-
-export interface ConversationSnapshot {
-  conversation: ConversationView;
-  entries: TranscriptEntryView[];
-  olderEntriesCursor?: string;
-  activeRun?: RunView;
-  activeAttempt?: AttemptView;
-  queuedInputs: SubmissionView[];
-  /** Skills explicitly selected for this conversation. */
-  selectedSkillIds?: string[];
-}
-
-export interface ModelProfileView {
-  gatewayId: string;
-  provider: string;
-  model: string;
-  protocol: ModelProtocol;
-  contextWindow: number;
-  maxOutputTokens: number;
-}
+// ---------------------------------------------------------------------------
+// Model routes and settings (ADR-0002)
+// ---------------------------------------------------------------------------
 
 export type ModelProtocol = "openai-responses" | "openai-chat-completions" | "anthropic-messages";
 
@@ -268,77 +126,43 @@ export interface ModelSettingsView {
   thinkingLevels: string[];
 }
 
-export type ConnectorAuthMode = "auto" | "none" | "oauth" | "header" | "cf-access";
-
-export interface ConnectorView {
-  id: ConnectorId;
-  name: string;
-  endpoint: string;
-  authMode: ConnectorAuthMode;
-  role?: "container" | "web-research";
-  state: "unconfigured" | "connecting" | "ready" | "auth_required" | "error";
-  version: number;
-  toolCount: number;
-  lastError?: string;
-}
-
-export interface SkillView {
-  id: SkillId;
-  name: string;
-  description: string;
-  enabled: boolean;
-  deleted: boolean;
-  currentVersion: number;
-  createdAt: number;
-  updatedAt: number;
-}
-
-export interface ConfigurationStatusView {
-  /** ADR-0002: route-based model settings when configured. */
-  model?: ModelSettingsView;
-  /** Historical concrete model profile saved before ADR-0002. */
-  legacyModel?: ModelProfileView;
+/**
+ * ADR-0003: the owner catalog the client fetches over HTTP. It carries no
+ * execution state; the selected conversation's transcript and live state come
+ * from its session socket.
+ */
+export interface CatalogView {
+  conversations: ConversationSummary[];
   routes: ModelRouteView[];
-  connectors: ConnectorView[];
-  skills: SkillView[];
-  workspaceRoot?: string;
-  settingsVersion: number;
-  missing: string[];
+  model?: ModelSettingsView;
 }
 
-export interface OwnerSnapshot {
-  revision: number;
-  conversations: ConversationSummaryView[];
-  configuration: ConfigurationStatusView;
-  selectedConversation?: ConversationSnapshot;
+export interface CreateConversationInput {
+  title?: string;
 }
 
-export interface HistoryQuery {
+export interface RenameConversationInput {
   conversationId: ConversationId;
-  beforeSequence?: number;
-  limit?: number;
+  title: string;
 }
 
-export interface HistoryPage {
+// ADR-0001: permanent conversation deletion uses the existing command path.
+export interface DeleteConversationInput {
   conversationId: ConversationId;
-  entries: TranscriptEntryView[];
-  olderEntriesCursor?: string;
-  revision: number;
 }
 
-export interface ArtifactReadQuery {
-  artifactId: ArtifactId;
-  offset?: number;
-  limit?: number;
+/**
+ * ADR-0002: model settings select an application-configured route; the server
+ * resolves and validates catalog metadata. Client-supplied model metadata is
+ * not authoritative.
+ */
+export interface RouteSettingsInput {
+  gatewayId: string;
+  routeId: string;
+  thinkingLevel?: string;
+  maxOutputTokens?: number;
 }
 
-export interface ArtifactPage {
-  artifactId: ArtifactId;
-  mimeType: string;
-  encoding: "utf8" | "base64";
-  byteCount: number;
-  totalByteCount: number;
-  complete: boolean;
-  offset: number;
-  text: string;
+export interface SaveModelProfileInput {
+  settings: RouteSettingsInput;
 }

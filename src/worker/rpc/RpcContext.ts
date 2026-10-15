@@ -1,18 +1,25 @@
-// Request-local RPC context (PLAN.md -> Server-function layer).
-// `RpcContext` is private server code. Bindings, credentials, and Durable Object
-// stubs never cross the Solid serialization boundary.
+// Request-local RPC context (ADR-0003).
+//
+// `RpcContext` is private server code. There is no owner Durable Object stub:
+// catalog operations read and write D1 directly, and session provisioning or
+// erasure goes through the session RPC. Bindings and credentials never cross
+// the Solid serialization boundary.
 
 import { getRequestEvent } from "@solidjs/web";
 import { AppError, ownerKey, type OwnerIdentity } from "../../shared/domain";
 import { getWorkerEnv } from "../context/WorkerEnv";
 import type { OwnerLocals } from "../auth/locals";
-import type { OwnerRpc } from "./OwnerRpc";
-import { OwnerRpcClient } from "./OwnerRpcClient";
+import { CatalogStore } from "../owner/CatalogStore";
+import { eraseSession, provisionSession } from "../session/SessionClient";
 
 export interface RpcContext {
   owner: OwnerIdentity;
-  ownerStub: OwnerRpc;
+  key: string;
+  env: Env;
+  catalog: CatalogStore;
   requestSignal: AbortSignal;
+  provision(conversationId: string): Promise<void>;
+  erase(conversationId: string): Promise<void>;
 }
 
 export function requireRpcContext(): RpcContext {
@@ -26,14 +33,16 @@ export function requireRpcContext(): RpcContext {
     throw new AppError("UNAUTHENTICATED", "no verified owner for this request");
   }
   const { env } = getWorkerEnv();
-  const id = env.OWNER.idFromName(ownerKey(owner));
-  const stub = env.OWNER.get(id);
-  const headers: Record<string, string> = { "x-mi-owner": ownerKey(owner) };
-  if (locals.accessAssertion) headers["x-mi-assertion"] = locals.accessAssertion;
-  if (locals.accessExpiresAt) headers["x-mi-auth-exp"] = String(locals.accessExpiresAt);
+  const key = ownerKey(owner);
+  const authExpiresAt = locals.accessExpiresAt;
+  const target = (conversationId: string) => ({ ownerKey: key, conversationId, authExpiresAt });
   return {
     owner,
-    ownerStub: new OwnerRpcClient(stub, headers),
+    key,
+    env,
+    catalog: new CatalogStore(env.DB),
     requestSignal: event.request.signal,
+    provision: (conversationId) => provisionSession(env, target(conversationId)),
+    erase: (conversationId) => eraseSession(env, target(conversationId)),
   };
 }

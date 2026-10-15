@@ -1,10 +1,10 @@
 import { For, Show, createSignal } from "solid-js";
 import type { JSX } from "@solidjs/web";
-import type { ConversationSummaryView } from "../../shared/domain";
-import type { DispatchResult } from "../commands/CommandDispatcher";
+import type { ConversationSummary } from "../../shared/domain";
+import type { DispatchResult } from "./types";
 
 export function ConversationList(props: {
-  conversations: ConversationSummaryView[];
+  conversations: ConversationSummary[];
   selectedId?: string;
   onSelect: (id: string) => void;
   onCreate: () => void;
@@ -19,7 +19,7 @@ export function ConversationList(props: {
   const [deletePending, setDeletePending] = createSignal(false);
   const [deleteError, setDeleteError] = createSignal<string>();
 
-  const startEditing = (conversation: ConversationSummaryView) => {
+  const startEditing = (conversation: ConversationSummary) => {
     setEditingId(conversation.id);
     setDraft(conversation.title);
     setRenameError(undefined);
@@ -43,7 +43,7 @@ export function ConversationList(props: {
         // Keep the entered value so the owner can correct and retry.
         setRenameError(result.error?.message ?? "Rename was refused");
       } else {
-        setRenameError("Rename could not be confirmed; it will be retried");
+        setRenameError("Rename could not be confirmed. Try again.");
       }
     } finally {
       setRenamePending(false);
@@ -62,7 +62,7 @@ export function ConversationList(props: {
       } else if (result.status === "rejected") {
         setDeleteError(result.error?.message ?? "Deletion was refused");
       } else {
-        setDeleteError("Deletion outcome is unknown; it will be retried");
+        setDeleteError("Deletion outcome is unknown. Try again.");
       }
     } finally {
       setDeletePending(false);
@@ -84,15 +84,10 @@ export function ConversationList(props: {
                   <>
                     <button
                       class={`conversation-item touch ${conversation.id === props.selectedId ? "selected" : ""}`}
+                      data-conversation-id={conversation.id}
                       onClick={() => props.onSelect(conversation.id)}
                     >
                       <span class="conversation-title">{conversation.title}</span>
-                      <Show when={conversation.activeRunState}>
-                        {(state) => <span class={`run-dot ${state()}`}>{state()}</span>}
-                      </Show>
-                      <Show when={conversation.queuedCount > 0}>
-                        <span class="queued-badge">{conversation.queuedCount} queued</span>
-                      </Show>
                     </button>
                     <div class="conversation-controls">
                       <button
@@ -155,8 +150,8 @@ export function ConversationList(props: {
                     Permanently delete “{conversation.title}” and its history? This cannot be undone.
                   </p>
                   <p class="hint">
-                    Deletion is refused while the conversation has queued or active work. Finish or
-                    cancel it first.
+                    Any queued or active work is stopped, and the conversation's
+                    history is permanently erased.
                   </p>
                   <div class="delete-actions">
                     <button

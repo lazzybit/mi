@@ -1,15 +1,13 @@
 import { For, Show, createEffect, createSignal } from "solid-js";
 import type { JSX } from "@solidjs/web";
-import type { TranscriptEntryView } from "../../shared/domain";
+import type { DisplayEntry } from "../view";
 import { AssistantMessage } from "./AssistantMessage";
 import { ToolCallCard } from "./ToolCallCard";
 
 export function Transcript(props: {
-  entries: TranscriptEntryView[];
+  entries: DisplayEntry[];
   onLoadOlder: () => void;
   hasOlder: boolean;
-  generation: number;
-  onReadArtifact: (artifactId: string) => Promise<string>;
 }): JSX.Element {
   let container: HTMLDivElement | undefined;
   const [following, setFollowing] = createSignal(true);
@@ -47,19 +45,8 @@ export function Transcript(props: {
             <Show when={entry.kind === "assistant" || entry.kind === "summary"}>
               <AssistantMessage entry={entry} />
             </Show>
-            <Show when={entry.kind === "tool_call"}>
-              <ToolCallCard
-                entry={entry}
-                generation={props.generation}
-                onReadArtifact={props.onReadArtifact}
-              />
-            </Show>
             <Show when={entry.kind === "tool_result"}>
-              <ToolCallCard
-                entry={entry}
-                generation={props.generation}
-                onReadArtifact={props.onReadArtifact}
-              />
+              <ToolCallCard entry={entry} />
             </Show>
           </article>
         )}

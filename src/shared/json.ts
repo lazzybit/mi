@@ -1,16 +1,11 @@
-// Deterministic JSON canonicalization and hashing for command idempotency.
-// The same normalized payload must always produce the same hash.
+// Deterministic payload hashing for command idempotency (ADR-0003). The same
+// normalized payload must always produce the same hash so a reused command id
+// with a changed payload is detected.
 
-export type JsonValue =
-  | null
-  | boolean
-  | number
-  | string
-  | JsonValue[]
-  | { [key: string]: JsonValue };
+type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue };
 
 /** Stable stringify: object keys sorted, arrays preserved. */
-export function canonicalJson(value: unknown): string {
+function canonicalJson(value: unknown): string {
   return JSON.stringify(normalize(value));
 }
 
@@ -48,48 +43,4 @@ export function hashPayload(value: unknown): string {
     hash = (hash * prime) & mask;
   }
   return hash.toString(16).padStart(16, "0");
-}
-
-/** Short, collision-resistant digest for content addressing. */
-export async function sha256Hex(text: string): Promise<string> {
-  const bytes = new TextEncoder().encode(text);
-  const digest = await crypto.subtle.digest("SHA-256", bytes);
-  return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
-}
-
-/** Normalize a skill resource path; rejects traversal. */
-export function normalizeResourcePath(path: string): string {
-  const trimmed = path.replace(/\\/g, "/").replace(/^\/+/, "");
-  const parts: string[] = [];
-  for (const part of trimmed.split("/")) {
-    if (part === "" || part === ".") continue;
-    if (part === "..") throw new Error(`resource path traversal rejected: ${path}`);
-    parts.push(part);
-  }
-  if (parts.length === 0) throw new Error("resource path must not be empty");
-  return parts.join("/");
-}
-
-export function isJsonObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-/**
- * Remove `undefined` properties so a payload survives the JSON transport used
- * by server functions. Solid rejects arguments that JSON cannot represent, and
- * optional form fields are commonly `undefined` rather than absent.
- */
-export function stripUndefined<T>(value: T): T {
-  if (Array.isArray(value)) {
-    return value.map((item) => stripUndefined(item)) as unknown as T;
-  }
-  if (value !== null && typeof value === "object") {
-    const out: Record<string, unknown> = {};
-    for (const [key, item] of Object.entries(value as Record<string, unknown>)) {
-      if (item === undefined) continue;
-      out[key] = stripUndefined(item);
-    }
-    return out as T;
-  }
-  return value;
 }

@@ -1,24 +1,23 @@
 import { Show, createSignal } from "solid-js";
 import type { JSX } from "@solidjs/web";
-import type { RunView } from "../../shared/domain";
 
 export function Composer(props: {
   draft: string;
-  activeRun?: RunView;
+  busy: boolean;
   onDraft: (value: string) => void;
-  onSubmit: (text: string, mode: "queue" | "steer") => void;
+  onSubmit: (text: string, whenBusy: "followUp" | "steer") => void;
 }): JSX.Element {
-  const [busy, setBusy] = createSignal(false);
+  const [sending, setSending] = createSignal(false);
 
-  const submit = async () => {
+  const submit = () => {
     const text = props.draft.trim();
     if (!text) return;
-    setBusy(true);
+    setSending(true);
     try {
-      props.onSubmit(text, "queue");
+      props.onSubmit(text, "followUp");
       props.onDraft("");
     } finally {
-      setBusy(false);
+      setSending(false);
     }
   };
 
@@ -33,18 +32,18 @@ export function Composer(props: {
         onKeyDown={(event) => {
           if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
             event.preventDefault();
-            void submit();
+            submit();
           }
         }}
       />
       <div class="composer-actions">
-        <button class="primary touch" disabled={busy()} onClick={() => void submit()}>
+        <button class="primary touch" disabled={sending()} onClick={() => submit()}>
           Queue
         </button>
-        <Show when={props.activeRun}>
+        <Show when={props.busy}>
           <button
             class="secondary touch"
-            disabled={busy() || props.draft.trim().length === 0}
+            disabled={sending() || props.draft.trim().length === 0}
             onClick={() => {
               props.onSubmit(props.draft.trim(), "steer");
               props.onDraft("");

@@ -1,14 +1,19 @@
-// Stored model settings (ADR-0002). Historical owners persisted a bare
-// `ModelProfile` JSON; route settings are discriminated by `kind: "route"`.
-// Every reader normalizes through `parseStoredSettings` so the two shapes are
-// never confused (a bare legacy profile has no `routeId` and must never be
-// resolved as a route).
+// Stored model settings (ADR-0002, ADR-0003).
+//
+// Route settings are the only supported shape: the deployment owns the
+// gateway, and the server resolves catalog metadata. Every reader normalizes
+// through `parseStoredRouteSettings` so an unknown or historical shape is
+// never treated as a valid route.
 
-import { parseJson } from "../storage/Sql";
-import type { ModelProfile } from "../types";
-import { AI_GATEWAY_ID, type RouteSettingsShape } from "./ModelRoutes";
+import { AI_GATEWAY_ID } from "./ModelRoutes";
 
-export type StoredModelSettings = RouteSettingsShape | { profile: ModelProfile };
+export interface StoredRouteSettings {
+  kind: "route";
+  gatewayId: string;
+  routeId: string;
+  thinkingLevel?: string;
+  maxOutputTokens?: number;
+}
 
 /**
  * The gateway is deployment-owned. Historical records may carry the old
@@ -21,24 +26,26 @@ function normalizeGatewayId(gatewayId: unknown): string {
     : AI_GATEWAY_ID;
 }
 
-/**
- * Read stored settings in every historical shape: route settings, a wrapped
- * legacy profile, or the bare legacy profile JSON.
- */
-export function parseStoredSettings(json: string | undefined): StoredModelSettings | undefined {
-  const raw = parseJson<Record<string, unknown> | undefined>(json, undefined);
-  if (!raw || typeof raw !== "object") return undefined;
-  if (raw.kind === "route" && typeof raw.routeId === "string") {
-    const settings = raw as unknown as RouteSettingsShape;
-    return { ...settings, gatewayId: normalizeGatewayId(settings.gatewayId) };
+/** Parse stored route settings; an unknown shape is `undefined`. */
+export function parseStoredRouteSettings(json: string | undefined | null): StoredRouteSettings | undefined {
+  if (!json) return undefined;
+  let raw: unknown;
+  try {
+    raw = JSON.parse(json);
+  } catch {
+    return undefined;
   }
-  if ("profile" in raw && typeof raw.profile === "object" && raw.profile !== null) {
-    const profile = raw.profile as unknown as ModelProfile;
-    return { profile: { ...profile, gatewayId: normalizeGatewayId(profile.gatewayId) } };
-  }
-  if (typeof raw.protocol === "string" && typeof raw.model === "string") {
-    const profile = raw as unknown as ModelProfile;
-    return { profile: { ...profile, gatewayId: normalizeGatewayId(profile.gatewayId) } };
-  }
-  return undefined;
+  if (typeof raw !== "object" || raw === null) return undefined;
+  const record = raw as Record<string, unknown>;
+  if (record.kind !== "route" || typeof record.routeId !== "string") return undefined;
+  return {
+    kind: "route",
+    gatewayId: normalizeGatewayId(record.gatewayId),
+    routeId: record.routeId,
+    thinkingLevel: typeof record.thinkingLevel === "string" ? record.thinkingLevel : undefined,
+    maxOutputTokens:
+      typeof record.maxOutputTokens === "number" && record.maxOutputTokens > 0
+        ? record.maxOutputTokens
+        : undefined,
+  };
 }

@@ -17,8 +17,8 @@
   "durable_objects": {
     "bindings": [
       {
-        "name": "OWNER",
-        "class_name": "OwnerObject"
+        "name": "SESSION",
+        "class_name": "SessionObject"
       }
     ]
   },
@@ -26,6 +26,18 @@
     {
       "tag": "v1",
       "new_sqlite_classes": ["OwnerObject"]
+    },
+    {
+      "tag": "v2",
+      "new_sqlite_classes": ["SessionObject"],
+      "deleted_classes": ["OwnerObject"]
+    }
+  ],
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "mi",
+      "database_id": "325930a8-ff96-403b-8f62-00302d6e7fcc"
     }
   ],
   "ai": {
@@ -36,7 +48,6 @@
   },
   "vars": {
     "ACCESS_ISSUER": "https://nomonator.cloudflareaccess.com",
-    "ACCESS_AUDIENCE": "3432b3f861ecf6603e5a5493cae17f8a5b6631b2ceb4d01dded8e81855a0edb4",
-    "OAUTH_CLIENT_METADATA_URL": "https://mi.nomonator.com/oauth/client-metadata.json"
+    "ACCESS_AUDIENCE": "3432b3f861ecf6603e5a5493cae17f8a5b6631b2ceb4d01dded8e81855a0edb4"
   }
 }
