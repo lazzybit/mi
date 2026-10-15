@@ -12,7 +12,8 @@ Related documents:
 The initial rollout keeps only authenticated conversation management, model
 chat, and streaming. Skills, application tools, MCP connectors, credentials,
 OAuth, and repository instructions are removed with the old owner object and
-must be rebuilt on the pi-durable harness.
+must be rebuilt on the pi-durable harness. ADR-0004 makes mi permanently
+single-user, so the rebuilt resources are application-wide.
 
 Future user needs:
 
@@ -22,12 +23,13 @@ Future user needs:
 
 Integration boundaries to design before implementing:
 
-- Owner-scoped storage for skills, skill resources, connector configuration,
-  and credentials, without restoring the retired execution storage.
+- Application-wide storage for skills, skill resources, connector
+  configuration, and credentials, without restoring the retired execution
+  storage.
 - Upstream extension and prompt-section registration for selected skills and
   repository instructions.
 - Upstream tool registration for MCP tools, with credential handling at the
-  owner boundary and an explicit replay policy per tool.
+  application boundary and an explicit replay policy per tool.
 - A credential and OAuth callback path that does not reintroduce an owner
   execution object.
 

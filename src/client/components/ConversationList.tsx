@@ -40,7 +40,7 @@ export function ConversationList(props: {
       if (result.status === "accepted") {
         setEditingId(undefined);
       } else if (result.status === "rejected") {
-        // Keep the entered value so the owner can correct and retry.
+        // Keep the entered value so the user can correct and retry.
         setRenameError(result.error?.message ?? "Rename was refused");
       } else {
         setRenameError("Rename could not be confirmed. Try again.");

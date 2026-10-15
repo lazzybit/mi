@@ -1,9 +1,9 @@
 import { describe, expect, it } from "vitest";
 import { SELF, env } from "cloudflare:test";
 
-// ADR-0003: the built Worker artifact exposes the Solid handler and the
-// SessionObject Durable Object class, enforces authentication on protected
-// routes, and keeps private material out of client chunks.
+// ADR-0003, ADR-0004: the built Worker artifact exposes the Solid handler and
+// the SessionObject Durable Object class, enforces production authentication on
+// protected routes, and keeps private material out of client chunks.
 describe("worker entry", () => {
   it("serves the Solid application shell", async () => {
     const response = await SELF.fetch("https://mi.test/");
@@ -21,9 +21,30 @@ describe("worker entry", () => {
     expect(response.status).toBe(401);
   });
 
+  it("rejects a cookie-only server-function request", async () => {
+    // ADR-0004: a `CF_Authorization` cookie is not an assertion source.
+    const response = await SELF.fetch("https://mi.test/_server", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        origin: "https://mi.test",
+        cookie: "CF_Authorization=not-a-real-assertion",
+      },
+      body: JSON.stringify({}),
+    });
+    expect(response.status).toBe(401);
+  });
+
   it("rejects WebSocket upgrades without an Access assertion", async () => {
     const response = await SELF.fetch("https://mi.test/ws?conversationId=abc", {
       headers: { Upgrade: "websocket" },
+    });
+    expect(response.status).toBe(401);
+  });
+
+  it("rejects a cookie-only WebSocket upgrade", async () => {
+    const response = await SELF.fetch("https://mi.test/ws?conversationId=abc", {
+      headers: { Upgrade: "websocket", cookie: "CF_Authorization=not-a-real-assertion" },
     });
     expect(response.status).toBe(401);
   });
@@ -34,25 +55,23 @@ describe("worker entry", () => {
     });
     // Authentication is checked first; the missing id is a client error only
     // for an authenticated caller.
-    expect([400, 401]).toContain(response.status);
+    expect(response.status).toBe(401);
   });
 
-  it("resolves the SessionObject Durable Object binding", async () => {
-    const id = env.SESSION.idFromName("owner|1::conversation-1");
+  it("resolves the SessionObject Durable Object binding by conversation id", async () => {
+    const id = env.SESSION.idFromName("conversation-1");
     const stub = env.SESSION.get(id);
     const response = await stub.fetch("https://session.internal/health", {
-      headers: { "x-mi-owner": "owner|1", "x-mi-auth-exp": String(Date.now() + 3_600_000) },
+      headers: { "x-mi-auth-exp": String(Date.now() + 3_600_000) },
     });
     expect(response.status).toBe(200);
     expect(await response.json()).toMatchObject({ ok: true });
   });
 
-  it("rejects a session request from another owner", async () => {
-    const id = env.SESSION.idFromName("owner|1::conversation-1");
+  it("rejects a session request without a verified expiry", async () => {
+    const id = env.SESSION.idFromName("conversation-1");
     const stub = env.SESSION.get(id);
-    const response = await stub.fetch("https://session.internal/health", {
-      headers: { "x-mi-owner": "owner|2", "x-mi-auth-exp": String(Date.now() + 3_600_000) },
-    });
+    const response = await stub.fetch("https://session.internal/health");
     expect(response.status).toBe(401);
   });
 

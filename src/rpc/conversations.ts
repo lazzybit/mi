@@ -1,7 +1,7 @@
 "use server";
 
-// Catalog server functions (ADR-0003). They read and write the owner-scoped D1
-// catalog directly; there is no owner Durable Object RPC.
+// Catalog server functions (ADR-0003, ADR-0004). They read and write the
+// application-wide D1 catalog directly; there is no owner Durable Object RPC.
 
 import {
   AppError,
@@ -18,14 +18,14 @@ import { requireRpcContext } from "../worker/rpc/RpcContext";
 
 export async function getCatalog(): Promise<CatalogView> {
   const context = requireRpcContext();
-  return context.catalog.view(context.key);
+  return context.catalog.view();
 }
 
 export async function createConversation(
   command: CommandEnvelope<CreateConversationInput>,
 ): Promise<CommandReceipt<{ conversationId: ConversationId }>> {
   const context = requireRpcContext();
-  return context.catalog.create(context.key, command, context.provision);
+  return context.catalog.create(command, context.provision);
 }
 
 // ADR-0001: rename and delete return an explicit serializable outcome so a
@@ -34,7 +34,7 @@ export async function createConversation(
 export async function renameConversation(input: RenameConversationInput): Promise<ActionResult> {
   try {
     const context = requireRpcContext();
-    await context.catalog.rename(context.key, input);
+    await context.catalog.rename(input);
     return { ok: true };
   } catch (error) {
     if (error instanceof AppError) return { ok: false, error: error.toApiError() };
@@ -45,7 +45,7 @@ export async function renameConversation(input: RenameConversationInput): Promis
 export async function deleteConversation(input: DeleteConversationInput): Promise<ActionResult> {
   try {
     const context = requireRpcContext();
-    await context.catalog.delete(context.key, input, context.erase);
+    await context.catalog.delete(input, context.erase);
     return { ok: true };
   } catch (error) {
     if (error instanceof AppError) return { ok: false, error: error.toApiError() };

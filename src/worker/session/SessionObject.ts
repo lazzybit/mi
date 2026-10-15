@@ -1,9 +1,9 @@
-// One pi-durable session per managed mi conversation (ADR-0003).
+// One pi-durable session per managed mi conversation (ADR-0003, ADR-0004).
 //
 // The session owns its transcript, submissions, tasks, retries, compaction,
-// and live state over one SQLite-backed Durable Object storage. The Worker
-// derives its address from the verified owner and the managed conversation id,
-// so this object never decides ownership on its own.
+// and live state over one SQLite-backed Durable Object storage. ADR-0004
+// addresses the object directly by the managed conversation id; there is no
+// owner component and the object does not decide ownership on its own.
 
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import type { ModelThinkingLevel, MutableModels } from "@earendil-works/pi-ai";
@@ -25,31 +25,19 @@ import {
   type SessionServerFrame,
 } from "../../shared/session-wire";
 import { createGatewayModels, gatewayModelRef, registerGatewayProvider, resolveRouteById } from "../models";
-import { CatalogStore } from "../owner/CatalogStore";
+import { CatalogStore } from "../catalog/CatalogStore";
+import { isDevelopment } from "../context/Environment";
 
 const HOST_MARKER = "mi.host";
-const ADDRESS_SEPARATOR = "::";
 
 interface HostMarker {
-  ownerKey: string;
   conversationId: string;
   initializedAt: number;
 }
 
 interface SocketAttachment {
-  authExpiresAt: number;
-}
-
-/** `ownerKey::conversationId`, the deterministic session address. */
-export function sessionAddress(ownerKey: string, conversationId: string): string {
-  return `${ownerKey}${ADDRESS_SEPARATOR}${conversationId}`;
-}
-
-function parseAddress(name: string | undefined): { ownerKey: string; conversationId: string } {
-  if (!name) throw new AppError("INVALID_INPUT", "session address is missing");
-  const index = name.lastIndexOf(ADDRESS_SEPARATOR);
-  if (index <= 0) throw new AppError("INVALID_INPUT", "session address is malformed");
-  return { ownerKey: name.slice(0, index), conversationId: name.slice(index + ADDRESS_SEPARATOR.length) };
+  /** Verified Access expiry in milliseconds; absent in development (ADR-0004). */
+  authExpiresAt?: number;
 }
 
 /**
@@ -65,7 +53,6 @@ function parseAddress(name: string | undefined): { ownerKey: string; conversatio
 export class SessionObject {
   private readonly ctx: DurableObjectState;
   private readonly env: Env;
-  private ownerKey = "";
   private conversationId = "";
   private readonly instanceId = crypto.randomUUID();
   private readonly ready: Promise<void>;
@@ -81,7 +68,6 @@ export class SessionObject {
   private deleting = false;
   private deleted = false;
   private markerError?: AppError;
-  private addressError?: AppError;
   private mutex: Promise<unknown> = Promise.resolve();
   private deleteTask?: Promise<void>;
 
@@ -92,20 +78,12 @@ export class SessionObject {
   constructor(ctx: DurableObjectState, env: Env) {
     this.ctx = ctx;
     this.env = env;
-    try {
-      const address = parseAddress(ctx.id.name);
-      this.ownerKey = address.ownerKey;
-      this.conversationId = address.conversationId;
-    } catch (error) {
-      // A named id is required; a malformed address must not silently fall
-      // back to any owner.
-      this.addressError =
-        error instanceof AppError ? error : new AppError("INVALID_INPUT", "session address is malformed");
-    }
+    // ADR-0004: the named object identifier is the managed conversation id.
+    this.conversationId = ctx.id.name ?? "";
     this.ready = ctx.blockConcurrencyWhile(async () => {
       const marker = await ctx.storage.get<HostMarker>(HOST_MARKER);
       if (!marker) return;
-      if (marker.ownerKey !== this.ownerKey || marker.conversationId !== this.conversationId) {
+      if (marker.conversationId !== this.conversationId) {
         this.markerError = new AppError("CONFLICT", "session storage does not match its address");
         return;
       }
@@ -127,9 +105,8 @@ export class SessionObject {
     await this.ready;
     const url = new URL(request.url);
     try {
-      if (this.addressError) throw this.addressError;
       if (this.markerError) throw this.markerError;
-      const auth = this.assertOwner(request);
+      const auth = this.assertAccess(request);
       if (isFixtureMode(this.env)) {
         this.fixtureOpenDelayMs = readHeaderNumber(request, "x-mi-fixture-open-delay-ms");
         this.fixtureCloseFailure = request.headers.get("x-mi-fixture-close-failure") === "1";
@@ -168,7 +145,7 @@ export class SessionObject {
   async webSocketMessage(socket: WebSocket, message: string | ArrayBuffer): Promise<void> {
     if (typeof message !== "string") return;
     const attachment = readAttachment(socket);
-    if (!attachment || attachment.authExpiresAt <= Date.now()) {
+    if (!attachment || isExpired(attachment)) {
       closeSocket(socket, 4401, "authentication expired");
       this.sockets.delete(socket);
       return;
@@ -215,7 +192,6 @@ export class SessionObject {
       if (this.initialized && this.harness && this.root) return;
       await this.doOpen(true);
       await this.ctx.storage.put<HostMarker>(HOST_MARKER, {
-        ownerKey: this.ownerKey,
         conversationId: this.conversationId,
         initializedAt: Date.now(),
       });
@@ -265,7 +241,7 @@ export class SessionObject {
       await scheduler.wait(this.fixtureOpenDelayMs);
     }
 
-    const settings = await new CatalogStore(this.env.DB).readSettings(this.ownerKey);
+    const settings = await new CatalogStore(this.env.DB).readSettings();
     const storage = await openDurableObjectSqliteStorage(this.ctx.storage);
     const models = createGatewayModels(this.env, { settings });
     let harness: Harness;
@@ -323,10 +299,8 @@ export class SessionObject {
   }
 
   private async catalogRow(): Promise<{ lifecycle: string } | undefined> {
-    const row = await this.env.DB.prepare(
-      `SELECT lifecycle FROM conversations WHERE id = ? AND owner_key = ?`,
-    )
-      .bind(this.conversationId, this.ownerKey)
+    const row = await this.env.DB.prepare(`SELECT lifecycle FROM conversations WHERE id = ?`)
+      .bind(this.conversationId)
       .first<{ lifecycle: string }>();
     return row ?? undefined;
   }
@@ -338,7 +312,7 @@ export class SessionObject {
    * with.
    */
   private async syncSettings(root: Conversation): Promise<void> {
-    const settings = await new CatalogStore(this.env.DB).readSettings(this.ownerKey);
+    const settings = await new CatalogStore(this.env.DB).readSettings();
     const key = JSON.stringify(settings ?? null);
     if (key === this.settingsKey) return;
     if (this.models) registerGatewayProvider(this.models, this.env, { settings });
@@ -370,7 +344,7 @@ export class SessionObject {
   // Observation
   // -------------------------------------------------------------------------
 
-  private async handleWebSocket(request: Request, authExpiresAt: number): Promise<Response> {
+  private async handleWebSocket(request: Request, authExpiresAt: number | undefined): Promise<Response> {
     const upgrade = request.headers.get("Upgrade");
     if (!upgrade || upgrade.toLowerCase() !== "websocket") {
       return new Response("expected a WebSocket upgrade", { status: 426 });
@@ -580,21 +554,13 @@ export class SessionObject {
   // Transport helpers
   // -------------------------------------------------------------------------
 
-  private assertOwner(request: Request): { authExpiresAt: number } {
-    const header = request.headers.get("x-mi-owner");
-    if (header !== this.ownerKey) {
-      throw new AppError("UNAUTHENTICATED", "session ownership mismatch");
-    }
+  private assertAccess(request: Request): { authExpiresAt?: number } {
+    // ADR-0004: development admits requests without a credential deadline.
+    if (isDevelopment(this.env)) return {};
     const expiresHeader = request.headers.get("x-mi-auth-exp");
     const expires = expiresHeader ? Number(expiresHeader) : Number.NaN;
     if (!Number.isFinite(expires) || expires <= Date.now()) {
       throw new AppError("UNAUTHENTICATED", "access assertion is missing or expired");
-    }
-    // Cross-check the forwarded conversation id against the object's own
-    // address, so a misrouted request cannot operate on another session.
-    const forwarded = request.headers.get("x-mi-conversation");
-    if (forwarded !== null && forwarded !== this.conversationId) {
-      throw new AppError("UNAUTHENTICATED", "session address does not match the conversation");
     }
     return { authExpiresAt: expires };
   }
@@ -605,7 +571,7 @@ export class SessionObject {
 
   private send(socket: WebSocket, frame: SessionServerFrame): void {
     const attachment = readAttachment(socket);
-    if (!attachment || attachment.authExpiresAt <= Date.now()) {
+    if (!attachment || isExpired(attachment)) {
       closeSocket(socket, 4401, "authentication expired");
       this.sockets.delete(socket);
       return;
@@ -636,6 +602,11 @@ function readAttachment(socket: WebSocket): SocketAttachment | undefined {
   } catch {
     return undefined;
   }
+}
+
+/** ADR-0004: an absent deadline means development, where expiry is not enforced. */
+function isExpired(attachment: SocketAttachment): boolean {
+  return attachment.authExpiresAt !== undefined && attachment.authExpiresAt <= Date.now();
 }
 
 function closeSocket(socket: WebSocket, code: number, reason: string): void {

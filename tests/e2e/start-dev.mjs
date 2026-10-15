@@ -1,15 +1,14 @@
 #!/usr/bin/env node
 // Test-only launcher for the browser acceptance suite. It starts the fixture
-// services (a local Access JWKS endpoint, a scripted model service, and a fake
-// MCP server), builds the application, and serves the production preview so
-// that Playwright can own the whole lifetime through its `webServer` option.
+// services (a scripted model service and a fake MCP server), builds the
+// application, and serves the production preview so that Playwright can own the
+// whole lifetime through its `webServer` option.
 //
 // The Solid client-mode shell only exists after a build (dev mode deliberately
 // serves no index.html), so the acceptance suite runs the real built Worker
-// through `vite preview`. The production authentication path is unchanged: the
-// browser sends a real signed Access assertion as the `CF_Authorization`
-// cookie, and the Worker verifies it against the local JWKS exactly as it would
-// verify Cloudflare Access. See tests/e2e/fixture/access.ts.
+// through `vite preview`. ADR-0004: the suite runs with
+// `ENVIRONMENT=development`, so it needs no Access signing key, JWKS endpoint,
+// or assertion cookie.
 //
 // The model fixture is driven by directives in the last user message:
 //   [[slow:3000]]  hold the response open (a live run to reconnect to)
@@ -18,43 +17,19 @@
 // Everything else answers with deterministic text.
 import { spawn, spawnSync } from "node:child_process";
 import { createServer } from "node:http";
-import { generateKeyPairSync } from "node:crypto";
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { rmSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const root = join(here, "..", "..");
-const stateDir = join(here, ".state");
 
 // A fresh state directory keeps each run isolated from previous Durable Object
 // storage.
-rmSync(stateDir, { recursive: true, force: true });
 rmSync(join(root, ".e2e-state"), { recursive: true, force: true });
-mkdirSync(stateDir, { recursive: true });
 
-// Ephemeral signing key: nothing is committed and nothing is reused between
-// runs.
-const { publicKey, privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
-const jwk = { ...publicKey.export({ format: "jwk" }), kid: "mi-e2e", alg: "RS256", use: "sig" };
-const privatePem = privateKey.export({ type: "pkcs8", format: "pem" });
-writeFileSync(join(stateDir, "access-key.json"), JSON.stringify({ privatePem, jwk }));
-
-const accessPort = Number(process.env.MI_E2E_ACCESS_PORT ?? 8899);
-const accessIssuer = `http://127.0.0.1:${accessPort}`;
 const modelPort = Number(process.env.MI_E2E_MODEL_PORT ?? 8898);
 const mcpPort = Number(process.env.MI_E2E_MCP_PORT ?? 8897);
-
-// --- Access JWKS fixture -----------------------------------------------------
-const jwksServer = createServer((request, response) => {
-  if (request.url && request.url.startsWith("/cdn-cgi/access/certs")) {
-    response.writeHead(200, { "content-type": "application/json" });
-    response.end(JSON.stringify({ keys: [jwk] }));
-    return;
-  }
-  response.writeHead(404);
-  response.end();
-});
 
 // --- Scripted model fixture --------------------------------------------------
 function sse(response, payload) {
@@ -263,7 +238,6 @@ const mcpServer = createServer((request, response) => {
 });
 
 await Promise.all([
-  new Promise((resolve) => jwksServer.listen(accessPort, "127.0.0.1", resolve)),
   new Promise((resolve) => modelServer.listen(modelPort, "127.0.0.1", resolve)),
   new Promise((resolve) => mcpServer.listen(mcpPort, "127.0.0.1", resolve)),
 ]);
@@ -272,8 +246,6 @@ const env = {
   ...process.env,
   NODE_ENV: "production",
   MI_E2E: "1",
-  MI_E2E_ACCESS_ISSUER: accessIssuer,
-  MI_E2E_ACCESS_AUDIENCE: "mi",
   MI_E2E_MODEL_URL: `http://127.0.0.1:${modelPort}`,
   CLOUDFLARE_VITE_FORCE_LOCAL: "true",
 };
@@ -283,7 +255,6 @@ const viteBin = join(root, "node_modules", "vite", "bin", "vite.js");
 if (process.env.MI_E2E_SKIP_BUILD !== "1") {
   const build = spawnSync(process.execPath, [viteBin, "build"], { cwd: root, stdio: "inherit", env });
   if (build.status !== 0) {
-    jwksServer.close();
     modelServer.close();
     mcpServer.close();
     process.exit(build.status ?? 1);
@@ -305,7 +276,6 @@ function shutdown(signal) {
   } catch {
     /* already gone */
   }
-  jwksServer.close();
   modelServer.close();
   mcpServer.close();
   setTimeout(() => process.exit(0), 1000).unref();
@@ -314,7 +284,6 @@ function shutdown(signal) {
 process.on("SIGTERM", () => shutdown("SIGTERM"));
 process.on("SIGINT", () => shutdown("SIGINT"));
 vite.on("exit", (code) => {
-  jwksServer.close();
   modelServer.close();
   mcpServer.close();
   process.exit(code ?? 0);

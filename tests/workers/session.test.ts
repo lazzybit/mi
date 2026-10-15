@@ -1,37 +1,38 @@
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it } from "vitest";
 import { env } from "cloudflare:test";
-import { CatalogStore } from "../../src/worker/owner/CatalogStore";
-import { sessionAddress } from "../../src/worker/session/SessionObject";
+import { CatalogStore } from "../../src/worker/catalog/CatalogStore";
+import { resetCatalog } from "./support/reset";
 
-function owner(): string {
-  return `owner-${crypto.randomUUID()}`;
+// ADR-0004: session objects are addressed directly by conversation id and
+// production requires the verified expiry. The test pool isolates storage per
+// file, and the catalog is reset between cases.
+beforeEach(resetCatalog);
+
+function stubFor(conversationId: string): DurableObjectStub {
+  return env.SESSION.get(env.SESSION.idFromName(conversationId));
 }
 
-function stubFor(key: string, conversationId: string): DurableObjectStub {
-  return env.SESSION.get(env.SESSION.idFromName(sessionAddress(key, conversationId)));
+function authHeaders(ttlMs = 3_600_000): Record<string, string> {
+  return { "x-mi-auth-exp": String(Date.now() + ttlMs) };
 }
 
-function authHeaders(key: string): Record<string, string> {
-  return { "x-mi-owner": key, "x-mi-auth-exp": String(Date.now() + 3_600_000) };
-}
-
-async function provision(key: string, conversationId: string): Promise<Response> {
-  return stubFor(key, conversationId).fetch("https://session.internal/provision", {
+async function provision(conversationId: string): Promise<Response> {
+  return stubFor(conversationId).fetch("https://session.internal/provision", {
     method: "POST",
-    headers: authHeaders(key),
+    headers: authHeaders(),
   });
 }
 
-async function erase(key: string, conversationId: string): Promise<Response> {
-  return stubFor(key, conversationId).fetch("https://session.internal/delete", {
+async function erase(conversationId: string): Promise<Response> {
+  return stubFor(conversationId).fetch("https://session.internal/delete", {
     method: "POST",
-    headers: authHeaders(key),
+    headers: authHeaders(),
   });
 }
 
-async function health(key: string, conversationId: string): Promise<{ initialized: boolean }> {
-  const response = await stubFor(key, conversationId).fetch("https://session.internal/health", {
-    headers: authHeaders(key),
+async function health(conversationId: string): Promise<{ initialized: boolean }> {
+  const response = await stubFor(conversationId).fetch("https://session.internal/health", {
+    headers: authHeaders(),
   });
   return (await response.json()) as { initialized: boolean };
 }
@@ -39,50 +40,46 @@ async function health(key: string, conversationId: string): Promise<{ initialize
 describe("SessionObject lifecycle", () => {
   it("initializes only through an explicit provisioning request", async () => {
     const catalog = new CatalogStore(env.DB);
-    const key = owner();
-    const receipt = await catalog.create(key, { commandId: "c1", payload: {} }, async (id) => {
-      expect((await provision(key, id)).status).toBe(200);
+    const receipt = await catalog.create({ commandId: "c1", payload: {} }, async (id) => {
+      expect((await provision(id)).status).toBe(200);
     });
     const conversationId = receipt.result.conversationId;
 
-    expect(await health(key, conversationId)).toMatchObject({ initialized: true });
+    expect(await health(conversationId)).toMatchObject({ initialized: true });
     // A second provisioning request is idempotent.
-    expect((await provision(key, conversationId)).status).toBe(200);
+    expect((await provision(conversationId)).status).toBe(200);
   });
 
   it("serializes concurrent provisioning requests", async () => {
     const catalog = new CatalogStore(env.DB);
-    const key = owner();
-    const receipt = await catalog.create(key, { commandId: "c1", payload: {} }, async () => {});
+    const receipt = await catalog.create({ commandId: "c1", payload: {} }, async () => {});
     const conversationId = receipt.result.conversationId;
 
     const responses = await Promise.all([
-      provision(key, conversationId),
-      provision(key, conversationId),
-      provision(key, conversationId),
+      provision(conversationId),
+      provision(conversationId),
+      provision(conversationId),
     ]);
     expect(responses.map((response) => response.status)).toEqual([200, 200, 200]);
-    expect(await health(key, conversationId)).toMatchObject({ initialized: true });
+    expect(await health(conversationId)).toMatchObject({ initialized: true });
   });
 
   it("refuses to provision a conversation that is not active", async () => {
-    const key = owner();
-    const response = await provision(key, "not-in-the-catalog");
+    const response = await provision("not-in-the-catalog");
     expect(response.status).toBe(409);
     expect(await response.json()).toMatchObject({ error: { code: "CONFLICT" } });
   });
 
   it("refuses an ordinary session request before provisioning", async () => {
     const catalog = new CatalogStore(env.DB);
-    const key = owner();
     // Create the row without provisioning, as a crash between activation and
     // provisioning would leave it.
-    const receipt = await catalog.create(key, { commandId: "c1", payload: {} }, async () => {});
+    const receipt = await catalog.create({ commandId: "c1", payload: {} }, async () => {});
     const conversationId = receipt.result.conversationId;
 
-    const response = await stubFor(key, conversationId).fetch(
+    const response = await stubFor(conversationId).fetch(
       "https://session.internal/ws?conversationId=" + conversationId,
-      { headers: { Upgrade: "websocket", ...authHeaders(key) } },
+      { headers: { Upgrade: "websocket", ...authHeaders() } },
     );
     expect(response.status).toBe(503);
     expect(await response.json()).toMatchObject({ error: { code: "NOT_READY", retryable: true } });
@@ -90,82 +87,79 @@ describe("SessionObject lifecycle", () => {
 
   it("serializes duplicate deletion and refuses later provisioning", async () => {
     const catalog = new CatalogStore(env.DB);
-    const key = owner();
-    const receipt = await catalog.create(key, { commandId: "c1", payload: {} }, async (id) => {
-      await provision(key, id);
+    const receipt = await catalog.create({ commandId: "c1", payload: {} }, async (id) => {
+      await provision(id);
     });
     const conversationId = receipt.result.conversationId;
 
-    const responses = await Promise.all([
-      erase(key, conversationId),
-      erase(key, conversationId),
-    ]);
+    const responses = await Promise.all([erase(conversationId), erase(conversationId)]);
     expect(responses.map((response) => response.status)).toEqual([200, 200]);
-    expect(await health(key, conversationId)).toMatchObject({ initialized: false });
+    expect(await health(conversationId)).toMatchObject({ initialized: false });
 
     // The erased session must not be re-initialized by a delayed provision,
     // even though the catalog row is still active in this test.
-    const late = await provision(key, conversationId);
+    const late = await provision(conversationId);
     expect(late.status).toBe(409);
   });
 
-  it("rejects a request from another owner", async () => {
-    const key = owner();
-    const other = owner();
-    const response = await stubFor(key, "conversation-1").fetch("https://session.internal/health", {
-      headers: authHeaders(other),
+  it("rejects a production request without an expiry", async () => {
+    const response = await stubFor("conversation-1").fetch("https://session.internal/health");
+    expect(response.status).toBe(401);
+    expect(await response.json()).toMatchObject({ error: { code: "UNAUTHENTICATED" } });
+  });
+
+  it("rejects a production request with an expired expiry", async () => {
+    const response = await stubFor("conversation-1").fetch("https://session.internal/health", {
+      headers: { "x-mi-auth-exp": String(Date.now() - 1000) },
     });
     expect(response.status).toBe(401);
   });
 
   it("waits for an in-flight initialization before deleting", async () => {
     const catalog = new CatalogStore(env.DB);
-    const key = owner();
-    const receipt = await catalog.create(key, { commandId: "c1", payload: {} }, async () => {});
+    const receipt = await catalog.create({ commandId: "c1", payload: {} }, async () => {});
     const conversationId = receipt.result.conversationId;
 
     // Start a slow provisioning request, let it enter the delayed open, then
     // request deletion concurrently.
-    const provisioning = stubFor(key, conversationId).fetch(
+    const provisioning = stubFor(conversationId).fetch(
       "https://session.internal/provision",
       {
         method: "POST",
-        headers: { ...authHeaders(key), "x-mi-fixture-open-delay-ms": "300" },
+        headers: { ...authHeaders(), "x-mi-fixture-open-delay-ms": "300" },
       },
     );
     await scheduler.wait(50);
-    const deleting = erase(key, conversationId);
+    const deleting = erase(conversationId);
     const [provisionResponse, deleteResponse] = await Promise.all([provisioning, deleting]);
 
     // Deletion is admitted after the open, so the session ends erased rather
     // than re-initialized by the delayed provision.
     expect(provisionResponse.status).toBe(200);
     expect(deleteResponse.status).toBe(200);
-    expect(await health(key, conversationId)).toMatchObject({ initialized: false });
-    expect((await provision(key, conversationId)).status).toBe(409);
+    expect(await health(conversationId)).toMatchObject({ initialized: false });
+    expect((await provision(conversationId)).status).toBe(409);
   });
 
   it("keeps deletion retryable after a closure failure", async () => {
     const catalog = new CatalogStore(env.DB);
-    const key = owner();
-    const receipt = await catalog.create(key, { commandId: "c1", payload: {} }, async (id) => {
-      await provision(key, id);
+    const receipt = await catalog.create({ commandId: "c1", payload: {} }, async (id) => {
+      await provision(id);
     });
     const conversationId = receipt.result.conversationId;
 
-    const failed = await stubFor(key, conversationId).fetch("https://session.internal/delete", {
+    const failed = await stubFor(conversationId).fetch("https://session.internal/delete", {
       method: "POST",
-      headers: { ...authHeaders(key), "x-mi-fixture-close-failure": "1" },
+      headers: { ...authHeaders(), "x-mi-fixture-close-failure": "1" },
     });
     expect(failed.status).not.toBe(200);
     // Storage was not erased under a live harness, so a retry can complete.
-    expect((await erase(key, conversationId)).status).toBe(200);
-    expect(await health(key, conversationId)).toMatchObject({ initialized: false });
+    expect((await erase(conversationId)).status).toBe(200);
+    expect(await health(conversationId)).toMatchObject({ initialized: false });
   });
 
   it("applies saved settings to the next request on an open session", async () => {
     const catalog = new CatalogStore(env.DB);
-    const key = owner();
     const originalFetch = globalThis.fetch;
     let captured: Record<string, unknown> | undefined;
     globalThis.fetch = (async (_input: RequestInfo | URL, init?: RequestInit) => {
@@ -179,20 +173,20 @@ describe("SessionObject lifecycle", () => {
       return new Response(body, { status: 200, headers: { "content-type": "text/event-stream" } });
     }) as typeof fetch;
     try {
-      const receipt = await catalog.create(key, { commandId: "c1", payload: {} }, async (id) => {
-        await provision(key, id);
+      const receipt = await catalog.create({ commandId: "c1", payload: {} }, async (id) => {
+        await provision(id);
       });
       const conversationId = receipt.result.conversationId;
-      const response = await stubFor(key, conversationId).fetch(
+      const response = await stubFor(conversationId).fetch(
         `https://session.internal/ws?conversationId=${conversationId}`,
-        { headers: { Upgrade: "websocket", ...authHeaders(key) } },
+        { headers: { Upgrade: "websocket", ...authHeaders() } },
       );
       const socket = response.webSocket!;
       socket.accept();
       await nextMessage(socket);
 
       // Change settings while the session is open, then submit.
-      await catalog.saveModelProfile(key, {
+      await catalog.saveModelProfile({
         settings: {
           gatewayId: "mi",
           routeId: "dynamic/runner",
@@ -212,33 +206,47 @@ describe("SessionObject lifecycle", () => {
     }
   });
 
-  it("rejects a malformed session address", async () => {
-    const id = env.SESSION.idFromName("no-separator");
-    const stub = env.SESSION.get(id);
-    const response = await stub.fetch("https://session.internal/health", {
-      headers: authHeaders("no-separator"),
+  it("closes a production socket whose expiry has passed", async () => {
+    const catalog = new CatalogStore(env.DB);
+    const receipt = await catalog.create({ commandId: "c1", payload: {} }, async (id) => {
+      await provision(id);
     });
-    expect(response.status).toBe(400);
+    const conversationId = receipt.result.conversationId;
+    const response = await stubFor(conversationId).fetch(
+      `https://session.internal/ws?conversationId=${conversationId}`,
+      { headers: { Upgrade: "websocket", ...authHeaders(200) } },
+    );
+    const socket = response.webSocket!;
+    socket.accept();
+    await nextMessage(socket);
+
+    const closed = new Promise<number>((resolve) => {
+      socket.addEventListener("close", (event) => resolve((event as CloseEvent).code), { once: true });
+    });
+    // Let the forwarded deadline pass, then send a control frame. The expired
+    // socket must not be reauthorized or answered.
+    await scheduler.wait(300);
+    socket.send(JSON.stringify({ type: "submit", requestId: "r1", text: "after expiry" }));
+    await expect(closed).resolves.toBe(4401);
   });
 
   it("pages seeded history without duplicates after a reset", async () => {
     const catalog = new CatalogStore(env.DB);
-    const key = owner();
-    const receipt = await catalog.create(key, { commandId: "c1", payload: {} }, async (id) => {
-      await provision(key, id);
+    const receipt = await catalog.create({ commandId: "c1", payload: {} }, async (id) => {
+      await provision(id);
     });
     const conversationId = receipt.result.conversationId;
-    const stub = stubFor(key, conversationId);
+    const stub = stubFor(conversationId);
     const seeded = await stub.fetch("https://session.internal/__fixture/seed", {
       method: "POST",
-      headers: authHeaders(key),
+      headers: authHeaders(),
       body: JSON.stringify({ count: 80, reset: true }),
     });
     expect(seeded.status).toBe(200);
 
     const response = await stub.fetch(
       `https://session.internal/ws?conversationId=${conversationId}`,
-      { headers: { Upgrade: "websocket", ...authHeaders(key) } },
+      { headers: { Upgrade: "websocket", ...authHeaders() } },
     );
     const socket = response.webSocket!;
     socket.accept();

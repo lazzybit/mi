@@ -24,11 +24,12 @@ function clientBuildFirst(): Plugin {
 }
 
 // Browser acceptance runs the real Worker under the Vite preview server. When
-// `MI_E2E=1` the fixture launcher (tests/e2e/start-dev.mjs) starts a local
-// Access JWKS endpoint and points the Worker at it. Remote bindings are
-// disabled so no Cloudflare credentials are required and the AI binding stays
-// simulated locally. Production builds are unaffected: without MI_E2E these
-// overrides are absent.
+// `MI_E2E=1` the fixture launcher (tests/e2e/start-dev.mjs) starts a scripted
+// model service and points the Worker at it. Remote bindings are disabled so no
+// Cloudflare credentials are required and the AI binding stays simulated
+// locally. ADR-0004: the browser suite runs with `ENVIRONMENT=development`, so
+// it needs no Access signing fixtures or JWKS endpoint. Production builds are
+// unaffected: without MI_E2E these overrides are absent.
 const e2e = process.env.MI_E2E === "1";
 
 export default defineConfig({
@@ -42,8 +43,7 @@ export default defineConfig({
             config: (config) => ({
               vars: {
                 ...config.vars,
-                ACCESS_ISSUER: process.env.MI_E2E_ACCESS_ISSUER ?? "http://127.0.0.1:8899",
-                ACCESS_AUDIENCE: process.env.MI_E2E_ACCESS_AUDIENCE ?? "mi",
+                ENVIRONMENT: "development",
                 MI_FIXTURE_MODEL_URL: process.env.MI_E2E_MODEL_URL ?? "http://127.0.0.1:8898",
               },
             }),

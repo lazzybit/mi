@@ -1,13 +1,50 @@
 // Shared browser helpers for the acceptance suite. They drive the real UI and
 // real server functions; nothing here stubs RPC or WebSocket results.
-import { expect, type BrowserContext, type Page } from "@playwright/test";
-import { login } from "./access";
+//
+// ADR-0004: mi is single-user, so every browser test shares one application
+// state and runs in development mode without Access credentials. The extended
+// `test` resets that state before each case through the normal deletion and
+// settings controls, which is the suite's only isolation mechanism.
+import { expect, test as base, type Page } from "@playwright/test";
 
-export async function openOwner(page: Page, context: BrowserContext, subject: string): Promise<void> {
-  await login(context, subject);
+export const test = base.extend<{ resetApplication: void }>({
+  resetApplication: [
+    async ({ page }, use) => {
+      await resetApplication(page);
+      await use();
+    },
+    { auto: true },
+  ],
+});
+
+export { expect };
+
+/** Open the application and wait for the catalog to arrive. */
+export async function openApp(page: Page): Promise<void> {
   await page.goto("/");
-  // The create button only renders once an authenticated catalog has arrived.
+  // The create button only renders once the catalog has arrived.
   await expect(page.locator(".conversation-list > button.primary")).toBeVisible({ timeout: 90_000 });
+}
+
+/** Remove every conversation and restore the default model settings. */
+export async function resetApplication(page: Page): Promise<void> {
+  await openApp(page);
+  for (let guard = 0; guard < 100; guard++) {
+    const items = page.locator(".conversation-item");
+    const count = await items.count();
+    if (count === 0) break;
+    await page.locator(".conversation-controls button[aria-label^='Delete ']").first().click();
+    await page.getByRole("button", { name: "Delete permanently" }).click();
+    await expect(items).toHaveCount(count - 1, { timeout: 60_000 });
+  }
+  // ADR-0002: restore the default route selection through the existing form.
+  await page.getByRole("button", { name: "Settings" }).click();
+  const route = page.getByLabel("Model route");
+  const firstOption = await route.locator("option").first().getAttribute("value");
+  if (firstOption) await route.selectOption(firstOption);
+  await page.getByLabel("Gateway id").fill("mi");
+  await page.getByRole("button", { name: "Save model settings" }).click();
+  await expect(page.locator(".saved")).toHaveText("Saved");
 }
 
 export async function saveModel(page: Page): Promise<void> {
