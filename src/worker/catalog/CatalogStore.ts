@@ -1,10 +1,12 @@
-// Owner catalog over D1 (ADR-0003).
+// Application catalog over D1 (ADR-0003, ADR-0004).
 //
-// There is no owner Durable Object. The authenticated Worker verifies access,
-// then reads and writes the owner-scoped catalog and settings here. Session
-// lifecycle crosses D1 and a session object with no shared transaction, so
-// every mutation uses conditional SQL, checked affected-row counts, and an
-// idempotent sequence.
+// There is no owner Durable Object and no owner scoping. The authenticated
+// Worker verifies access, then reads and writes the application-wide catalog
+// and settings here. Conversations use their conversation identifiers,
+// settings use one singleton record, and creation receipts use their command
+// identifiers. Session lifecycle crosses D1 and a session object with no shared
+// transaction, so every mutation uses conditional SQL, checked affected-row
+// counts, and an idempotent sequence.
 
 import {
   AppError,
@@ -25,10 +27,11 @@ import { parseStoredRouteSettings, type StoredRouteSettings } from "../models/St
 
 const CREATE_KIND = "conversation.create";
 const DEFAULT_TITLE = "New conversation";
+/** ADR-0004: the application is single-user, so settings have one fixed key. */
+const SETTINGS_KEY = "app";
 
 export interface ConversationRow {
   id: string;
-  owner_key: string;
   title: string;
   lifecycle: ConversationLifecycle;
   created_at: number;
@@ -58,7 +61,6 @@ export class CatalogStore {
           .prepare(
             `CREATE TABLE IF NOT EXISTS conversations (
                id TEXT PRIMARY KEY,
-               owner_key TEXT NOT NULL,
                title TEXT NOT NULL,
                lifecycle TEXT NOT NULL,
                created_at INTEGER NOT NULL,
@@ -68,32 +70,30 @@ export class CatalogStore {
           .run();
         await this.db
           .prepare(
-            `CREATE INDEX IF NOT EXISTS conversations_owner_updated
-               ON conversations (owner_key, updated_at DESC, id)`,
+            `CREATE INDEX IF NOT EXISTS conversations_updated
+               ON conversations (updated_at DESC, id)`,
           )
           .run();
         await this.db
           .prepare(
             `CREATE TABLE IF NOT EXISTS settings (
-               owner_key TEXT PRIMARY KEY,
+               key TEXT PRIMARY KEY,
                model_json TEXT,
                updated_at INTEGER NOT NULL
              )`,
           )
           .run();
         // ADR-0003: creation receipts only. Rename, delete, and settings are
-        // direct owner-scoped operations.
+        // direct application-wide operations.
         await this.db
           .prepare(
             `CREATE TABLE IF NOT EXISTS commands (
-               command_id TEXT NOT NULL,
-               owner_key TEXT NOT NULL,
+               command_id TEXT PRIMARY KEY,
                kind TEXT NOT NULL,
                payload_hash TEXT NOT NULL,
                result_json TEXT NOT NULL,
                outcome TEXT NOT NULL,
-               created_at INTEGER NOT NULL,
-               PRIMARY KEY (owner_key, command_id)
+               created_at INTEGER NOT NULL
              )`,
           )
           .run();
@@ -102,40 +102,38 @@ export class CatalogStore {
     return this.schemaReady;
   }
 
-  async list(ownerKey: string): Promise<ConversationSummary[]> {
+  async list(): Promise<ConversationSummary[]> {
     await this.ensureSchema();
     const { results } = await this.db
       .prepare(
         `SELECT id, title, lifecycle, created_at, updated_at
            FROM conversations
-          WHERE owner_key = ?
           ORDER BY updated_at DESC, id`,
       )
-      .bind(ownerKey)
       .all<ConversationRow>();
     return (results ?? []).map(toSummary);
   }
 
-  async get(ownerKey: string, conversationId: string): Promise<ConversationRow | undefined> {
+  async get(conversationId: string): Promise<ConversationRow | undefined> {
     await this.ensureSchema();
     const row = await this.db
-      .prepare(`SELECT * FROM conversations WHERE id = ? AND owner_key = ?`)
-      .bind(conversationId, ownerKey)
+      .prepare(`SELECT * FROM conversations WHERE id = ?`)
+      .bind(conversationId)
       .first<ConversationRow>();
     return row ?? undefined;
   }
 
-  async readSettings(ownerKey: string): Promise<StoredRouteSettings | undefined> {
+  async readSettings(): Promise<StoredRouteSettings | undefined> {
     await this.ensureSchema();
     const row = await this.db
-      .prepare(`SELECT model_json FROM settings WHERE owner_key = ?`)
-      .bind(ownerKey)
+      .prepare(`SELECT model_json FROM settings WHERE key = ?`)
+      .bind(SETTINGS_KEY)
       .first<{ model_json: string | null }>();
     return parseStoredRouteSettings(row?.model_json ?? undefined);
   }
 
-  async view(ownerKey: string): Promise<CatalogView> {
-    const [conversations, stored] = await Promise.all([this.list(ownerKey), this.readSettings(ownerKey)]);
+  async view(): Promise<CatalogView> {
+    const [conversations, stored] = await Promise.all([this.list(), this.readSettings()]);
     const routes = listRouteViews();
     if (!stored) return { conversations, routes };
     const selection = resolveRouteById(stored.routeId);
@@ -147,14 +145,13 @@ export class CatalogStore {
    * batch; activation and provisioning follow as separate, retryable steps.
    */
   async create(
-    ownerKey: string,
     command: CommandEnvelope<CreateConversationInput>,
     provision: SessionProvisioner,
   ): Promise<CommandReceipt<{ conversationId: string }>> {
     await this.ensureSchema();
     const payloadHash = hashPayload(command.payload);
-    const existing = await this.findCommand(ownerKey, command.commandId);
-    if (existing) return this.resumeCreate(ownerKey, existing, payloadHash, provision);
+    const existing = await this.findCommand(command.commandId);
+    if (existing) return this.resumeCreate(existing, payloadHash, provision);
 
     const conversationId = crypto.randomUUID();
     const now = Date.now();
@@ -167,42 +164,41 @@ export class CatalogStore {
       await this.db.batch([
         this.db
           .prepare(
-            `INSERT INTO conversations (id, owner_key, title, lifecycle, created_at, updated_at)
-             VALUES (?, ?, ?, 'creating', ?, ?)`,
+            `INSERT INTO conversations (id, title, lifecycle, created_at, updated_at)
+             VALUES (?, ?, 'creating', ?, ?)`,
           )
-          .bind(conversationId, ownerKey, title, now, now),
+          .bind(conversationId, title, now, now),
         this.db
           .prepare(
-            `INSERT INTO commands (command_id, owner_key, kind, payload_hash, result_json, outcome, created_at)
-             VALUES (?, ?, ?, ?, ?, 'accepted', ?)`,
+            `INSERT INTO commands (command_id, kind, payload_hash, result_json, outcome, created_at)
+             VALUES (?, ?, ?, ?, 'accepted', ?)`,
           )
-          .bind(command.commandId, ownerKey, CREATE_KIND, payloadHash, JSON.stringify(receipt), now),
+          .bind(command.commandId, CREATE_KIND, payloadHash, JSON.stringify(receipt), now),
       ]);
     } catch (error) {
       // Two concurrent creates with the same command id: the loser adopts the
       // winner's receipt instead of surfacing a unique-constraint failure.
-      const winner = await this.findCommand(ownerKey, command.commandId);
-      if (winner) return this.resumeCreate(ownerKey, winner, payloadHash, provision);
+      const winner = await this.findCommand(command.commandId);
+      if (winner) return this.resumeCreate(winner, payloadHash, provision);
       throw error;
     }
 
-    await this.activate(ownerKey, conversationId);
+    await this.activate(conversationId);
     await provision(conversationId);
     return receipt;
   }
 
   /** Resume an existing create receipt without ever recreating a missing row. */
   private async resumeCreate(
-    ownerKey: string,
     row: CommandRow,
     payloadHash: string,
     provision: SessionProvisioner,
   ): Promise<CommandReceipt<{ conversationId: string }>> {
     const receipt = this.replay<{ conversationId: string }>(row, CREATE_KIND, payloadHash);
-    const current = await this.get(ownerKey, receipt.result.conversationId);
+    const current = await this.get(receipt.result.conversationId);
     if (!current) return receipt;
-    if (current.lifecycle === "creating") await this.activate(ownerKey, current.id);
-    const after = await this.get(ownerKey, receipt.result.conversationId);
+    if (current.lifecycle === "creating") await this.activate(current.id);
+    const after = await this.get(receipt.result.conversationId);
     if (after && after.lifecycle === "active") await provision(after.id);
     return receipt;
   }
@@ -212,16 +208,16 @@ export class CatalogStore {
    * row becomes active before the session is provisioned, so an active row
    * without an initialized session is recoverable by retrying the create.
    */
-  private async activate(ownerKey: string, conversationId: string): Promise<void> {
+  private async activate(conversationId: string): Promise<void> {
     const result = await this.db
       .prepare(
         `UPDATE conversations SET lifecycle = 'active', updated_at = ?
-          WHERE id = ? AND owner_key = ? AND lifecycle = 'creating'`,
+          WHERE id = ? AND lifecycle = 'creating'`,
       )
-      .bind(Date.now(), conversationId, ownerKey)
+      .bind(Date.now(), conversationId)
       .run();
     if ((result.meta.changes ?? 0) > 0) return;
-    const row = await this.get(ownerKey, conversationId);
+    const row = await this.get(conversationId);
     if (!row) throw new AppError("NOT_FOUND", "conversation disappeared during creation");
     if (row.lifecycle === "deleting") {
       throw new AppError("CONFLICT", "conversation is being deleted");
@@ -229,19 +225,19 @@ export class CatalogStore {
     // Already active: a concurrent retry activated it.
   }
 
-  async rename(ownerKey: string, input: RenameConversationInput): Promise<void> {
+  async rename(input: RenameConversationInput): Promise<void> {
     await this.ensureSchema();
     const title = normalizeTitle(input.title);
     if (!title) throw new AppError("INVALID_INPUT", "title must not be empty");
     const result = await this.db
       .prepare(
         `UPDATE conversations SET title = ?, updated_at = ?
-          WHERE id = ? AND owner_key = ? AND lifecycle != 'deleting'`,
+          WHERE id = ? AND lifecycle != 'deleting'`,
       )
-      .bind(title, Date.now(), input.conversationId, ownerKey)
+      .bind(title, Date.now(), input.conversationId)
       .run();
     if ((result.meta.changes ?? 0) > 0) return;
-    const row = await this.get(ownerKey, input.conversationId);
+    const row = await this.get(input.conversationId);
     if (!row) throw new AppError("NOT_FOUND", "conversation not found");
     throw new AppError("CONFLICT", "conversation is being deleted");
   }
@@ -250,21 +246,21 @@ export class CatalogStore {
    * Quiesce and erase one session, then remove its catalog row. An absent row
    * means the deletion already completed; a retry resumes a partial sequence.
    */
-  async delete(ownerKey: string, input: DeleteConversationInput, erase: SessionEraser): Promise<void> {
+  async delete(input: DeleteConversationInput, erase: SessionEraser): Promise<void> {
     await this.ensureSchema();
-    const row = await this.get(ownerKey, input.conversationId);
+    const row = await this.get(input.conversationId);
     if (!row) return;
 
     if (row.lifecycle !== "deleting") {
       const result = await this.db
         .prepare(
           `UPDATE conversations SET lifecycle = 'deleting', updated_at = ?
-            WHERE id = ? AND owner_key = ? AND lifecycle IN ('active', 'creating')`,
+            WHERE id = ? AND lifecycle IN ('active', 'creating')`,
         )
-        .bind(Date.now(), row.id, ownerKey)
+        .bind(Date.now(), row.id)
         .run();
       if ((result.meta.changes ?? 0) === 0) {
-        const current = await this.get(ownerKey, row.id);
+        const current = await this.get(row.id);
         if (!current) return;
         if (current.lifecycle !== "deleting") {
           throw new AppError("CONFLICT", "conversation could not be marked for deletion");
@@ -273,13 +269,10 @@ export class CatalogStore {
     }
 
     await erase(row.id);
-    await this.db
-      .prepare(`DELETE FROM conversations WHERE id = ? AND owner_key = ?`)
-      .bind(row.id, ownerKey)
-      .run();
+    await this.db.prepare(`DELETE FROM conversations WHERE id = ?`).bind(row.id).run();
   }
 
-  async saveModelProfile(ownerKey: string, input: SaveModelProfileInput): Promise<ModelSettingsView> {
+  async saveModelProfile(input: SaveModelProfileInput): Promise<ModelSettingsView> {
     await this.ensureSchema();
     const settings = input.settings;
     if (!settings.gatewayId || !settings.routeId) {
@@ -318,20 +311,18 @@ export class CatalogStore {
     };
     await this.db
       .prepare(
-        `INSERT INTO settings (owner_key, model_json, updated_at) VALUES (?, ?, ?)
-           ON CONFLICT(owner_key) DO UPDATE SET model_json = excluded.model_json, updated_at = excluded.updated_at`,
+        `INSERT INTO settings (key, model_json, updated_at) VALUES (?, ?, ?)
+           ON CONFLICT(key) DO UPDATE SET model_json = excluded.model_json, updated_at = excluded.updated_at`,
       )
-      .bind(ownerKey, JSON.stringify(stored), Date.now())
+      .bind(SETTINGS_KEY, JSON.stringify(stored), Date.now())
       .run();
     return settingsView(stored, selection);
   }
 
-  private async findCommand(ownerKey: string, commandId: string): Promise<CommandRow | undefined> {
+  private async findCommand(commandId: string): Promise<CommandRow | undefined> {
     const row = await this.db
-      .prepare(
-        `SELECT kind, payload_hash, result_json FROM commands WHERE command_id = ? AND owner_key = ?`,
-      )
-      .bind(commandId, ownerKey)
+      .prepare(`SELECT kind, payload_hash, result_json FROM commands WHERE command_id = ?`)
+      .bind(commandId)
       .first<CommandRow>();
     return row ?? undefined;
   }

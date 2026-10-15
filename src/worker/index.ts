@@ -8,14 +8,15 @@
 //
 // It verifies access, then either serves catalog operations through the Solid
 // server-function handler or forwards a selected-session WebSocket to the
-// session object. There is no owner Durable Object and no owner WebSocket.
+// session object. ADR-0004 removes ownership: there is no owner Durable Object,
+// no owner header, and each session object is addressed by its conversation id.
 
 import { handleRequest } from "virtual:solid-ssr-handler";
-import { AppError, ownerKey, type OwnerIdentity } from "../shared/domain";
-import { verifyAccess, type VerifiedAccessAssertion } from "./auth/verifyRequest";
+import { AppError } from "../shared/domain";
+import { verifyAccess } from "./auth/verifyRequest";
 import { runWithWorkerEnv } from "./context/WorkerEnv";
-import { CatalogStore } from "./owner/CatalogStore";
-import { SessionObject, sessionAddress } from "./session/SessionObject";
+import { CatalogStore } from "./catalog/CatalogStore";
+import { SessionObject } from "./session/SessionObject";
 
 export { SessionObject, handleRequest };
 
@@ -48,32 +49,32 @@ async function route(request: Request, env: Env): Promise<Response> {
 }
 
 async function sessionRoute(request: Request, env: Env): Promise<Response> {
-  let verified;
+  let authExpiresAt: number | undefined;
   try {
-    verified = await verifyAccess(request, env);
+    authExpiresAt = await verifyAccess(request, env);
   } catch (error) {
     return unauthorized(error);
   }
-  return forwardToSession(request, env, verified);
+  return forwardToSession(request, env, authExpiresAt);
 }
 
 async function fixtureRoute(request: Request, env: Env): Promise<Response> {
   if (readFixtureModelUrl(env) === undefined) {
     return new Response("not found", { status: 404 });
   }
-  let verified;
+  let authExpiresAt: number | undefined;
   try {
-    verified = await verifyAccess(request, env);
+    authExpiresAt = await verifyAccess(request, env);
   } catch (error) {
     return unauthorized(error);
   }
-  return forwardToSession(request, env, verified);
+  return forwardToSession(request, env, authExpiresAt);
 }
 
 async function forwardToSession(
   request: Request,
   env: Env,
-  verified: VerifiedAccessAssertion,
+  authExpiresAt: number | undefined,
 ): Promise<Response> {
   const url = new URL(request.url);
   const conversationId = url.searchParams.get("conversationId");
@@ -84,8 +85,7 @@ async function forwardToSession(
     );
   }
 
-  const key = ownerKey(verified.owner);
-  const row = await new CatalogStore(env.DB).get(key, conversationId);
+  const row = await new CatalogStore(env.DB).get(conversationId);
   if (!row) {
     return Response.json(
       { error: { code: "NOT_FOUND", message: "conversation not found", retryable: false } },
@@ -99,11 +99,15 @@ async function forwardToSession(
     );
   }
 
-  const stub = env.SESSION.get(env.SESSION.idFromName(sessionAddress(key, conversationId)));
+  const stub = env.SESSION.get(env.SESSION.idFromName(conversationId));
   const headers = new Headers(request.headers);
-  headers.set("x-mi-owner", key);
-  headers.set("x-mi-auth-exp", String(verified.expiresAt));
-  headers.set("x-mi-conversation", conversationId);
+  // ADR-0004: production replaces any incoming deadline with the verified one;
+  // development forwards none and the session admits the request without it.
+  if (authExpiresAt !== undefined) {
+    headers.set("x-mi-auth-exp", String(authExpiresAt));
+  } else {
+    headers.delete("x-mi-auth-exp");
+  }
   const forwarded = new Request(request.url, {
     method: request.method,
     headers,
@@ -122,6 +126,3 @@ function readFixtureModelUrl(env: Env): string | undefined {
   const value = (env as unknown as Record<string, unknown>).MI_FIXTURE_MODEL_URL;
   return typeof value === "string" && value.length > 0 ? value : undefined;
 }
-
-export type { OwnerIdentity };
-export { ownerKey };

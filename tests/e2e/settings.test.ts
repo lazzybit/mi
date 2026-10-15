@@ -1,8 +1,7 @@
-import { expect, test } from "@playwright/test";
-import { openOwner, saveModel } from "./fixture/app";
+import { openApp, saveModel, expect, test } from "./fixture/app";
 
-test("model settings survive a reload", async ({ page, context }, testInfo) => {
-  await openOwner(page, context, `owner-${testInfo.testId}`);
+test("model settings survive a reload", async ({ page }) => {
+  await openApp(page);
   await saveModel(page);
 
   await page.reload();

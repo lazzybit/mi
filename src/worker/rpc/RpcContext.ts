@@ -1,4 +1,4 @@
-// Request-local RPC context (ADR-0003).
+// Request-local RPC context (ADR-0003, ADR-0004).
 //
 // `RpcContext` is private server code. There is no owner Durable Object stub:
 // catalog operations read and write D1 directly, and session provisioning or
@@ -6,15 +6,13 @@
 // the Solid serialization boundary.
 
 import { getRequestEvent } from "@solidjs/web";
-import { AppError, ownerKey, type OwnerIdentity } from "../../shared/domain";
+import { AppError } from "../../shared/domain";
 import { getWorkerEnv } from "../context/WorkerEnv";
-import type { OwnerLocals } from "../auth/locals";
-import { CatalogStore } from "../owner/CatalogStore";
+import type { AuthLocals } from "../auth/locals";
+import { CatalogStore } from "../catalog/CatalogStore";
 import { eraseSession, provisionSession } from "../session/SessionClient";
 
 export interface RpcContext {
-  owner: OwnerIdentity;
-  key: string;
   env: Env;
   catalog: CatalogStore;
   requestSignal: AbortSignal;
@@ -27,18 +25,12 @@ export function requireRpcContext(): RpcContext {
   if (!event) {
     throw new AppError("UNAUTHENTICATED", "no request context for this server function");
   }
-  const locals = event.locals as OwnerLocals;
-  const owner = locals.owner;
-  if (!owner) {
-    throw new AppError("UNAUTHENTICATED", "no verified owner for this request");
-  }
+  const locals = event.locals as AuthLocals;
   const { env } = getWorkerEnv();
-  const key = ownerKey(owner);
+  // ADR-0004: production carries the verified expiry; development carries none.
   const authExpiresAt = locals.accessExpiresAt;
-  const target = (conversationId: string) => ({ ownerKey: key, conversationId, authExpiresAt });
+  const target = (conversationId: string) => ({ conversationId, authExpiresAt });
   return {
-    owner,
-    key,
     env,
     catalog: new CatalogStore(env.DB),
     requestSignal: event.request.signal,

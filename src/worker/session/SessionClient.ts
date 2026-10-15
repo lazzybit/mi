@@ -1,25 +1,24 @@
-// Internal session RPC used by the Worker (ADR-0003).
+// Internal session RPC used by the Worker (ADR-0003, ADR-0004).
 //
 // Catalog operations cross into a session object to provision or erase its
-// storage. The Worker has already verified access; it forwards the verified
-// owner and assertion expiry so the session object can re-check them.
+// storage. The Worker has already verified access; in production it forwards
+// the verified assertion expiry so the session object can re-check it.
+// ADR-0004 addresses each session object directly by its conversation id.
 
 import { AppError, type ApiError } from "../../shared/domain";
-import { sessionAddress } from "./SessionObject";
 
 interface SessionTarget {
-  ownerKey: string;
   conversationId: string;
   authExpiresAt?: number;
 }
 
 function stubFor(env: Env, target: SessionTarget): DurableObjectStub {
-  const id = env.SESSION.idFromName(sessionAddress(target.ownerKey, target.conversationId));
+  const id = env.SESSION.idFromName(target.conversationId);
   return env.SESSION.get(id);
 }
 
 function headersFor(target: SessionTarget): Headers {
-  const headers = new Headers({ "x-mi-owner": target.ownerKey });
+  const headers = new Headers();
   if (target.authExpiresAt !== undefined) {
     headers.set("x-mi-auth-exp", String(target.authExpiresAt));
   }

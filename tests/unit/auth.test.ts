@@ -27,13 +27,36 @@ async function fixture() {
 }
 
 describe("AccessVerifier", () => {
-  it("accepts a valid assertion and derives the owner", async () => {
+  // ADR-0004: verification returns the expiry the application enforces; it no
+  // longer derives an identity from the assertion.
+  it("accepts a valid assertion and returns its expiry", async () => {
     const { verifier, sign } = await fixture();
     const token = await sign({ sub: "user-1" });
-    const verified = await verifier.verify(token);
-    expect(verified.owner).toEqual({ issuer: ISSUER, subject: "user-1" });
-    expect(verified.email).toBe("owner@example.com");
-    expect(verified.expiresAt).toBeGreaterThan(Date.now());
+    const expiresAt = await verifier.verify(token);
+    expect(expiresAt).toBeGreaterThan(Date.now());
+  });
+
+  it("accepts an assertion without a subject", async () => {
+    const { verifier, privateKey } = await fixture();
+    const token = await new SignJWT({ email: "owner@example.com" })
+      .setProtectedHeader({ alg: "RS256", kid: "test-key" })
+      .setIssuer(ISSUER)
+      .setAudience(AUDIENCE)
+      .setIssuedAt()
+      .setExpirationTime("5m")
+      .sign(privateKey);
+    await expect(verifier.verify(token)).resolves.toBeGreaterThan(Date.now());
+  });
+
+  it("rejects a missing expiry", async () => {
+    const { verifier, privateKey } = await fixture();
+    const token = await new SignJWT({ sub: "user-1" })
+      .setProtectedHeader({ alg: "RS256", kid: "test-key" })
+      .setIssuer(ISSUER)
+      .setAudience(AUDIENCE)
+      .setIssuedAt()
+      .sign(privateKey);
+    await expect(verifier.verify(token)).rejects.toBeInstanceOf(AppError);
   });
 
   it("rejects a wrong issuer", async () => {
@@ -51,18 +74,6 @@ describe("AccessVerifier", () => {
   it("rejects an expired assertion", async () => {
     const { verifier, sign } = await fixture();
     const token = await sign({ sub: "user-1" }, { expiresIn: "-10m" });
-    await expect(verifier.verify(token)).rejects.toBeInstanceOf(AppError);
-  });
-
-  it("rejects a missing subject", async () => {
-    const { verifier, privateKey } = await fixture();
-    const token = await new SignJWT({ email: "owner@example.com" })
-      .setProtectedHeader({ alg: "RS256", kid: "test-key" })
-      .setIssuer(ISSUER)
-      .setAudience(AUDIENCE)
-      .setIssuedAt()
-      .setExpirationTime("5m")
-      .sign(privateKey);
     await expect(verifier.verify(token)).rejects.toBeInstanceOf(AppError);
   });
 

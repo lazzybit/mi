@@ -1,22 +1,15 @@
-// Access assertion verification (PLAN.md -> Behavior -> Authentication).
-// Verifies issuer, audience, signature, subject, and expiry before any owner is
-// associated with a request.
+// Access assertion verification (ADR-0004).
+//
+// Production verifies issuer, audience, signature, and expiry before a request
+// is admitted. The verified expiry is the only value the application consumes;
+// the authenticated identity no longer partitions application state.
 
 import { createRemoteJWKSet, jwtVerify, type JWTVerifyGetKey } from "jose";
-import { AppError, type OwnerIdentity } from "../../shared/domain";
+import { AppError } from "../../shared/domain";
 
 export interface AccessConfig {
   issuer: string;
   audience: string | string[];
-}
-
-export interface VerifiedAccessAssertion {
-  owner: OwnerIdentity;
-  expiresAt: number;
-  /** Raw JWT, forwarded as `Cf-Access-Token` for Access delegation. */
-  assertion: string;
-  email?: string;
-  claims: Record<string, unknown>;
 }
 
 export type JwtKeyResolver = JWTVerifyGetKey;
@@ -45,7 +38,8 @@ export class AccessVerifier {
     private readonly jwks: JwksProvider,
   ) {}
 
-  async verify(token: string): Promise<VerifiedAccessAssertion> {
+  /** Verify a production assertion and return its expiry in milliseconds. */
+  async verify(token: string): Promise<number> {
     if (!token) {
       throw new AppError("UNAUTHENTICATED", "missing Access assertion");
     }
@@ -69,21 +63,12 @@ export class AccessVerifier {
       throw new AppError("UNAUTHENTICATED", `Access assertion rejected: ${message}`);
     }
 
-    const subject = typeof payload.sub === "string" ? payload.sub : undefined;
-    const issuer = typeof payload.iss === "string" ? payload.iss : undefined;
+    // ADR-0004: the application enforces socket deadlines, so the expiry is a
+    // required claim rather than an optional one.
     const exp = typeof payload.exp === "number" ? payload.exp : undefined;
-    if (!subject || !issuer || exp === undefined) {
-      throw new AppError("UNAUTHENTICATED", "Access assertion is missing required claims");
+    if (exp === undefined) {
+      throw new AppError("UNAUTHENTICATED", "Access assertion is missing its expiry");
     }
-
-    const owner: OwnerIdentity = { issuer, subject };
-    const result: VerifiedAccessAssertion = {
-      owner,
-      expiresAt: exp * 1000,
-      assertion: token,
-      claims: payload,
-    };
-    if (typeof payload.email === "string") result.email = payload.email;
-    return result;
+    return exp * 1000;
   }
 }

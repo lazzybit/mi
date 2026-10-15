@@ -1,4 +1,4 @@
-// Browser session socket (ADR-0003).
+// Browser session socket (ADR-0003, ADR-0004).
 //
 // One socket observes one managed conversation. The server sends the current
 // pi-durable view first and then the exact Chord operations of each commit;
@@ -18,7 +18,6 @@ export type ConnectionStatus =
   | "connecting"
   | "live"
   | "reconnecting"
-  | "authentication_required"
   | "offline";
 
 interface PendingRequest {
@@ -177,8 +176,8 @@ export class SessionFeed {
       this.setStatus("live");
     });
     socket.addEventListener("message", (event) => this.onMessage(socket, event.data));
-    socket.addEventListener("close", (event) => this.onClose(socket, event.code));
-    socket.addEventListener("error", () => this.onClose(socket, undefined));
+    socket.addEventListener("close", () => this.onClose(socket));
+    socket.addEventListener("error", () => this.onClose(socket));
   }
 
   private onMessage(socket: WebSocket, raw: unknown): void {
@@ -218,13 +217,11 @@ export class SessionFeed {
     }
   }
 
-  private onClose(socket: WebSocket, code?: number): void {
+  private onClose(socket: WebSocket): void {
     if (this.disposed || this.socket !== socket) return;
     this.failPending(new AppError("NOT_READY", "session socket closed", true));
-    if (code === 4401) {
-      this.setStatus("authentication_required");
-      return;
-    }
+    // ADR-0004: socket closure, including close code 4401, follows ordinary
+    // connection handling. mi does not acquire or renew credentials.
     if (typeof navigator !== "undefined" && navigator.onLine === false) {
       this.setStatus("offline");
       return;

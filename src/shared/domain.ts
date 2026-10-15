@@ -1,22 +1,13 @@
-// Shared domain contracts (ADR-0003).
+// Shared domain contracts (ADR-0003, ADR-0004).
 //
 // mi manages user-visible conversations and coordinates peripheral
 // capabilities. Agent execution and its authoritative state belong to
-// pi-durable; this module keeps only the owner identity, the D1 catalog
-// projection, and the model-route settings the Worker validates.
+// pi-durable; this module keeps the D1 catalog projection and the model-route
+// settings the Worker validates. ADR-0004 makes the application single-user, so
+// the catalog and settings are application-wide rather than owner-scoped.
 
 export type ConversationId = string;
 export type CommandId = string;
-
-export interface OwnerIdentity {
-  issuer: string;
-  subject: string;
-}
-
-/** Canonical `issuer|subject` form used for D1 scoping and session addresses. */
-export function ownerKey(owner: OwnerIdentity): string {
-  return `${owner.issuer}|${owner.subject}`;
-}
 
 export interface CommandEnvelope<T> {
   commandId: CommandId;
@@ -77,7 +68,7 @@ export function appErrorFromApi(api: ApiError): AppError {
 }
 
 // ---------------------------------------------------------------------------
-// Owner catalog (D1)
+// Application catalog (D1)
 // ---------------------------------------------------------------------------
 
 /** Lifecycle of a managed conversation row. */
@@ -127,7 +118,7 @@ export interface ModelSettingsView {
 }
 
 /**
- * ADR-0003: the owner catalog the client fetches over HTTP. It carries no
+ * ADR-0003: the application catalog the client fetches over HTTP. It carries no
  * execution state; the selected conversation's transcript and live state come
  * from its session socket.
  */

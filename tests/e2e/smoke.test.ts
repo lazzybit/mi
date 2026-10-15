@@ -1,26 +1,24 @@
-import { expect, test } from "@playwright/test";
-import { createConversation, horizontalOverflow, openOwner } from "./fixture/app";
+import { createConversation, horizontalOverflow, openApp, expect, test } from "./fixture/app";
 
-// The application shell is served without a token (Access protects it at the
-// edge); application data and the composer require a verified assertion.
-test("unauthenticated shell exposes no application state", async ({ page }) => {
-  await page.goto("/");
-  await expect(page.locator("h1")).toHaveText("mi");
-  await expect(page.locator(".loading")).toBeVisible();
-  await expect(page.locator(".composer-input")).toHaveCount(0);
-  await expect(page.getByRole("button", { name: "New conversation" })).toHaveCount(0);
+// ADR-0004: development access needs no Access credential. Production
+// authentication rejection is covered by the Worker suite instead.
+test("development access serves application state without credentials", async ({ page }) => {
+  await openApp(page);
+  await expect(page.getByRole("button", { name: "New conversation" })).toBeVisible();
+  await createConversation(page);
+  await expect(page.locator(".composer-input")).toBeVisible();
 });
 
-test("narrow shell uses touch-sized controls without horizontal overflow", async ({ page, context }, testInfo) => {
-  await openOwner(page, context, `owner-${testInfo.testId}`);
+test("narrow shell uses touch-sized controls without horizontal overflow", async ({ page }) => {
+  await openApp(page);
   const button = page.getByRole("button", { name: "New conversation" });
   const box = await button.boundingBox();
   expect(box?.height ?? 0).toBeGreaterThanOrEqual(44);
   expect(await horizontalOverflow(page)).toBeLessThanOrEqual(1);
 });
 
-test("orientation change keeps the composer reachable", async ({ page, context }, testInfo) => {
-  await openOwner(page, context, `owner-${testInfo.testId}`);
+test("orientation change keeps the composer reachable", async ({ page }) => {
+  await openApp(page);
   await createConversation(page);
 
   await page.setViewportSize({ width: 844, height: 390 });

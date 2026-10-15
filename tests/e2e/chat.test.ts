@@ -1,12 +1,11 @@
-import { expect, test } from "@playwright/test";
-import { createConversation, openOwner, saveModel, submit } from "./fixture/app";
+import { createConversation, openApp, saveModel, submit, expect, test } from "./fixture/app";
 
 // ADR-0003: generation now runs on pi-durable through the pi-ai gateway
 // provider. This exercises the whole path against the built Worker: session
 // socket submission, harness generation, the fixture model, committed view
 // operations, and client rendering.
-test("submits input and renders the committed assistant reply", async ({ page, context }, testInfo) => {
-  await openOwner(page, context, `owner-${testInfo.testId}`);
+test("submits input and renders the committed assistant reply", async ({ page, context }) => {
+  await openApp(page);
   await saveModel(page);
   await createConversation(page);
   await submit(page, "hello there");
@@ -17,8 +16,8 @@ test("submits input and renders the committed assistant reply", async ({ page, c
   });
 });
 
-test("queues a follow-up while a run is active", async ({ page, context }, testInfo) => {
-  await openOwner(page, context, `owner-${testInfo.testId}`);
+test("queues a follow-up while a run is active", async ({ page, context }) => {
+  await openApp(page);
   await saveModel(page);
   await createConversation(page);
 
@@ -37,8 +36,8 @@ test("queues a follow-up while a run is active", async ({ page, context }, testI
 // ADR-0003: recovery is the next request or reconnect. Committed work survives
 // an abrupt object restart and continues when the client reconnects; no alarm
 // is scheduled.
-test("resumes committed work after an object restart", async ({ page, context }, testInfo) => {
-  await openOwner(page, context, `owner-${testInfo.testId}`);
+test("resumes committed work after an object restart", async ({ page, context }) => {
+  await openApp(page);
   await saveModel(page);
   await createConversation(page);
 
@@ -73,8 +72,8 @@ test("resumes committed work after an object restart", async ({ page, context },
 
 // ADR-0003: an unacknowledged submission is retained and resent with the same
 // request id when the session socket reconnects.
-test("resends an unacknowledged submission after reconnect", async ({ page, context }, testInfo) => {
-  await openOwner(page, context, `owner-${testInfo.testId}`);
+test("resends an unacknowledged submission after reconnect", async ({ page, context }) => {
+  await openApp(page);
   await saveModel(page);
   await createConversation(page);
 
@@ -92,7 +91,7 @@ test("resends an unacknowledged submission after reconnect", async ({ page, cont
 
 // ADR-0003: when the server accepted input but its acknowledgement was lost,
 // the client resends the same request id and the harness deduplicates it.
-test("recovers a lost submission acknowledgement", async ({ page, context }, testInfo) => {
+test("recovers a lost submission acknowledgement", async ({ page, context }) => {
   let dropped = false;
   await page.routeWebSocket("**/ws**", (ws) => {
     const server = ws.connectToServer();
@@ -107,7 +106,7 @@ test("recovers a lost submission acknowledgement", async ({ page, context }, tes
     });
   });
 
-  await openOwner(page, context, `owner-${testInfo.testId}`);
+  await openApp(page);
   await saveModel(page);
   await createConversation(page);
   await submit(page, "ack loss");
@@ -127,8 +126,8 @@ test("recovers a lost submission acknowledgement", async ({ page, context }, tes
 
 // ADR-0003: switching conversations discards and reacquires observation without
 // clearing the committed transcript of the conversation switched back to.
-test("preserves the transcript when switching conversations", async ({ page, context }, testInfo) => {
-  await openOwner(page, context, `owner-${testInfo.testId}`);
+test("preserves the transcript when switching conversations", async ({ page, context }) => {
+  await openApp(page);
   await saveModel(page);
   await createConversation(page);
   // Give the first conversation a distinct title so the second is unambiguous.

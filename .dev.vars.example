@@ -1,0 +1,8 @@
+# Local development bindings. Copy to `.dev.vars` (gitignored).
+#
+# ADR-0004: one environment setting selects the authentication mode.
+# `development` admits requests without an Access assertion and skips the
+# credential-dependent expiry checks, so local development needs no Access
+# configuration. `production` (the deployed value in wrangler.jsonc) verifies
+# `Cf-Access-Jwt-Assertion` and enforces `x-mi-auth-exp`.
+ENVIRONMENT=development

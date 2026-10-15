@@ -1,11 +1,10 @@
-import { expect, test, type WebSocketRoute } from "@playwright/test";
-import { login } from "./fixture/access";
-import { createConversation, openOwner, submit } from "./fixture/app";
+import type { WebSocketRoute } from "@playwright/test";
+import { createConversation, openApp, expect, test } from "./fixture/app";
 
 // Connection states are distinct from execution state: going offline does not
 // mean a run stopped, and coming back online reconnects.
-test("reports offline while the network is down and recovers", async ({ page, context }, testInfo) => {
-  await openOwner(page, context, `owner-${testInfo.testId}`);
+test("reports offline while the network is down and recovers", async ({ page, context }) => {
+  await openApp(page);
   await createConversation(page);
   await expect(page.locator(".connection")).toHaveText("live", { timeout: 60_000 });
 
@@ -16,7 +15,7 @@ test("reports offline while the network is down and recovers", async ({ page, co
   await expect(page.locator(".connection")).toHaveText("live", { timeout: 60_000 });
 });
 
-test("returns to reconnecting when the socket drops while online", async ({ page, context }, testInfo) => {
+test("returns to reconnecting when the socket drops while online", async ({ page }) => {
   // Proxy the real observation socket so the test can drop one connection
   // without mocking the server or its frames.
   const sockets: WebSocketRoute[] = [];
@@ -27,7 +26,7 @@ test("returns to reconnecting when the socket drops while online", async ({ page
     sockets.push(ws);
   });
 
-  await openOwner(page, context, `owner-${testInfo.testId}`);
+  await openApp(page);
   await createConversation(page);
   await expect(page.locator(".connection")).toHaveText("live", { timeout: 60_000 });
 
@@ -38,26 +37,23 @@ test("returns to reconnecting when the socket drops while online", async ({ page
   await expect(page.locator(".connection")).toHaveText("live", { timeout: 60_000 });
 });
 
-test("requires authentication again when the socket assertion expires", async ({ browser }, testInfo) => {
-  const subject = `owner-${testInfo.testId}`;
-  const expiring = await browser.newContext();
-  const expiringPage = await expiring.newPage();
-  try {
-    await login(expiring, subject, { ttlSeconds: 6 });
-    await expiringPage.goto("/");
-    await expect(expiringPage.locator(".conversation-list > button.primary")).toBeVisible({ timeout: 90_000 });
-    await createConversation(expiringPage);
-    await expect(expiringPage.locator(".connection")).toHaveText("live", { timeout: 60_000 });
+// ADR-0004: close code 4401 has no special client handling. An authentication
+// closure follows ordinary reconnection, and the client never acquires or
+// renews credentials.
+test("reconnects after an authentication close code", async ({ page }) => {
+  const sockets: WebSocketRoute[] = [];
+  await page.routeWebSocket("**/ws**", (ws) => {
+    const server = ws.connectToServer();
+    ws.onMessage((message) => server.send(message));
+    server.onMessage((message) => ws.send(message));
+    sockets.push(ws);
+  });
 
-    // Let the assertion expire, then send a control frame: an expired socket
-    // must not be silently reauthorized.
-    await expiringPage.waitForTimeout(7000);
-    await submit(expiringPage, "after expiry");
+  await openApp(page);
+  await createConversation(page);
+  await expect(page.locator(".connection")).toHaveText("live", { timeout: 60_000 });
 
-    await expect(expiringPage.locator(".connection")).toHaveText("authentication_required", {
-      timeout: 60_000,
-    });
-  } finally {
-    await expiring.close();
-  }
+  sockets[0]?.close({ code: 4401, reason: "authentication expired" });
+  await expect(page.locator(".connection")).toHaveText("reconnecting", { timeout: 30_000 });
+  await expect(page.locator(".connection")).toHaveText("live", { timeout: 60_000 });
 });

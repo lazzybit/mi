@@ -47,6 +47,7 @@
     "enabled": true
   },
   "vars": {
+    "ENVIRONMENT": "production",
     "ACCESS_ISSUER": "https://nomonator.cloudflareaccess.com",
     "ACCESS_AUDIENCE": "3432b3f861ecf6603e5a5493cae17f8a5b6631b2ceb4d01dded8e81855a0edb4"
   }
