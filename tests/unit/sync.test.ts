@@ -22,7 +22,7 @@ function snapshot(revision: number): OwnerSnapshot {
   return {
     revision,
     conversations: [],
-    configuration: { connectors: [], skills: [], settingsVersion: 0, missing: [] },
+    configuration: { routes: [], connectors: [], skills: [], settingsVersion: 0, missing: [] },
   };
 }
 
@@ -82,7 +82,7 @@ describe("SyncHub", () => {
         },
         {
           kind: "configuration.update",
-          value: { connectors: [], skills: [], settingsVersion: 1, missing: [] },
+          value: { routes: [], connectors: [], skills: [], settingsVersion: 1, missing: [] },
         },
       ]),
     );
@@ -116,7 +116,7 @@ describe("SyncHub", () => {
     const hub = new SyncHub(() => snapshot(0));
     const socket = new FakeSocket();
     hub.attach(socket, socket, undefined, Date.now() - 1);
-    hub.publish(commit(1, [{ kind: "configuration.update", value: { connectors: [], skills: [], settingsVersion: 1, missing: [] } }]));
+    hub.publish(commit(1, [{ kind: "configuration.update", value: { routes: [], connectors: [], skills: [], settingsVersion: 1, missing: [] } }]));
     expect(socket.closed?.code).toBe(4401);
     expect(hub.connectionCount()).toBe(0);
   });

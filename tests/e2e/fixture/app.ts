@@ -14,9 +14,10 @@ export async function openOwner(page: Page, context: BrowserContext, subject: st
   await expect(page.locator(".conversation-list > button.primary")).toBeVisible({ timeout: 90_000 });
 }
 
-export async function saveModel(page: Page, model = "fixture-model"): Promise<void> {
+export async function saveModel(page: Page): Promise<void> {
   await page.getByRole("button", { name: "Settings" }).click();
-  await page.getByLabel("Model", { exact: true }).fill(model);
+  // ADR-0002: the form only selects the configured route; metadata is resolved
+  // server-side. The initial route is selected by default.
   await page.getByRole("button", { name: "Save model settings" }).click();
   await expect(page.locator(".saved")).toHaveText("Saved");
   await page.getByRole("button", { name: "Chat" }).click();

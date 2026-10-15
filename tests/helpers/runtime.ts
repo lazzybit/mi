@@ -1,10 +1,11 @@
+import type { AssistantMessage, StopReason } from "@earendil-works/pi-ai";
 import { AppError } from "../../src/shared/domain";
 import type { ReplayPolicy } from "../../src/shared/domain";
 import type {
-  CompletedModelTurn,
   ModelEvent,
   ModelGateway,
   ModelRequest,
+  PersistedModelToolCall,
 } from "../../src/worker/models/types";
 import type {
   DiscoveredTool,
@@ -36,22 +37,67 @@ export class FakeAlarmStore implements AlarmStore {
 
 export type ModelScript = ModelEvent[] | ((request: ModelRequest) => ModelEvent[] | Promise<ModelEvent[]>);
 
+/** ADR-0002: canonical pi-ai assistant message fixture for tests. */
+export function assistantFixture(options: {
+  text?: string;
+  stopReason?: StopReason;
+  toolCalls?: PersistedModelToolCall[];
+  errorMessage?: string;
+  thinking?: string;
+}): AssistantMessage {
+  const content: AssistantMessage["content"] = [];
+  if (options.thinking) content.push({ type: "thinking", thinking: options.thinking });
+  if (options.text) content.push({ type: "text", text: options.text });
+  for (const call of options.toolCalls ?? []) {
+    content.push({
+      type: "toolCall",
+      id: call.toolCallId,
+      name: call.name,
+      arguments: (call.arguments ?? {}) as Record<string, never>,
+    });
+  }
+  return {
+    role: "assistant",
+    content,
+    api: "openai-completions",
+    provider: "fixture",
+    model: "fixture-model",
+    usage: {
+      input: 12,
+      output: 8,
+      cacheRead: 0,
+      cacheWrite: 0,
+      reasoning: 0,
+      totalTokens: 20,
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+    },
+    stopReason: options.stopReason ?? (options.toolCalls?.length ? "toolUse" : "stop"),
+    errorMessage: options.errorMessage,
+    timestamp: 0,
+  };
+}
+
 export class FakeModelGateway implements ModelGateway {
   readonly requests: ModelRequest[] = [];
   readonly scripts: ModelScript[] = [];
   defaultScript: ModelScript = [
-    { type: "completed", value: { text: "done", toolCalls: [] } satisfies CompletedModelTurn },
+    { type: "completed", message: assistantFixture({ text: "done" }) },
   ];
 
   push(script: ModelScript): void {
     this.scripts.push(script);
   }
 
-  pushText(text: string, tools: CompletedModelTurn["toolCalls"] = []): void {
+  pushText(text: string, tools: PersistedModelToolCall[] = []): void {
     this.scripts.push([
       { type: "text_delta", text },
-      { type: "completed", value: { text, toolCalls: tools } },
+      { type: "completed", message: assistantFixture({ text, toolCalls: tools }) },
     ]);
+  }
+
+  /** Push a scripted terminal assistant message (any stop reason). */
+  pushAssistant(message: AssistantMessage): void {
+    this.scripts.push([{ type: "completed", message }]);
   }
 
   async *stream(request: ModelRequest, signal: AbortSignal): AsyncIterable<ModelEvent> {
@@ -169,6 +215,7 @@ export function envelope<T>(payload: T): { commandId: string; payload: T } {
   return { commandId: `cmd_${commandCounter}`, payload };
 }
 
+/** Historical concrete profile shape (pre-ADR-0002), used by legacy tests. */
 export const TEST_MODEL_PROFILE = {
   gatewayId: "test-gateway",
   provider: "test-provider",
@@ -182,7 +229,7 @@ export async function bootstrapConversation(
   runtime: OwnerRuntime,
 ): Promise<{ conversationId: string }> {
   await runtime.dispatch("saveModelProfile", [
-    envelope({ profile: TEST_MODEL_PROFILE }),
+    envelope({ settings: { gatewayId: "test-gateway", routeId: "dynamic/runner" } }),
   ]);
   const receipt = (await runtime.dispatch("createConversation", [
     envelope({ title: "Test" }),

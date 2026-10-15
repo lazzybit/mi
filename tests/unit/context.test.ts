@@ -39,15 +39,13 @@ describe("CompactionPlanner", () => {
 describe("ContextBudget", () => {
   it("flags an over-budget request", () => {
     const budget = new ContextBudget();
+    const profile = {
+      kind: "legacy" as const,
+      profile: { ...TEST_MODEL_PROFILE, contextWindow: 40, maxOutputTokens: 20 },
+    };
     const assessment = budget.assess(
-      { ...TEST_MODEL_PROFILE, contextWindow: 40, maxOutputTokens: 20 },
-      {
-        attemptId: "a",
-        profile: { ...TEST_MODEL_PROFILE, contextWindow: 40, maxOutputTokens: 20 },
-        system: "x".repeat(400),
-        history: [],
-        tools: [],
-      },
+      { systemPrompt: "x".repeat(400), messages: [], tools: [] },
+      profile,
     );
     expect(assessment.overBudget).toBe(true);
   });
@@ -78,11 +76,15 @@ describe("buildHistory", () => {
 describe("compaction preserves source history", () => {
   it("creates a summary without deleting original entries", async () => {
     const { runtime, model, backend } = createTestRuntime();
-    await runtime.dispatch("saveModelProfile", [
-      envelope({
-        profile: { ...TEST_MODEL_PROFILE, contextWindow: 24, maxOutputTokens: 8 },
-      }),
-    ]);
+    // ADR-0002: a historical (pre-route) settings profile stays readable and
+    // keeps the small window this test relies on.
+    runtime.store.transaction((tx) => {
+      tx.settings.writeModelProfile(
+        JSON.stringify({
+          profile: { ...TEST_MODEL_PROFILE, contextWindow: 500, maxOutputTokens: 8 },
+        }),
+      );
+    });
     const created = (await runtime.dispatch("createConversation", [
       envelope({ title: "Long" }),
     ])) as { result: { conversationId: string } };
@@ -97,7 +99,7 @@ describe("compaction preserves source history", () => {
           conversationId,
           sequence,
           kind: i % 2 === 0 ? "user" : "assistant",
-          text: `prior message ${i}`,
+          text: `prior message ${i} ${"x".repeat(300)}`,
           isError: false,
           createdAt: i,
         });
