@@ -1,43 +1,16 @@
-import { createSignal } from "solid-js";
 import type { JSX } from "@solidjs/web";
-import type { ConfigurationStatusView } from "../../shared/domain";
-import { McpConnectionList } from "./McpConnectionList";
+import type { CatalogView } from "../../shared/domain";
 import { ModelSettingsForm } from "./ModelSettingsForm";
-import { SkillList } from "./SkillList";
+import type { AppActions } from "./types";
 
-export function SettingsScreen(props: {
-  configuration: ConfigurationStatusView;
-  dispatch: (kind: string, payload: unknown) => Promise<unknown>;
-}): JSX.Element {
-  const [tab, setTab] = createSignal<"model" | "connectors" | "skills">("model");
+export function SettingsScreen(props: { catalog: CatalogView; actions: AppActions }): JSX.Element {
   return (
     <section class="settings-screen">
-      <nav class="tabs">
-        <button class={`tab touch ${tab() === "model" ? "active" : ""}`} onClick={() => setTab("model")}>
-          Model
-        </button>
-        <button
-          class={`tab touch ${tab() === "connectors" ? "active" : ""}`}
-          onClick={() => setTab("connectors")}
-        >
-          Connectors
-        </button>
-        <button class={`tab touch ${tab() === "skills" ? "active" : ""}`} onClick={() => setTab("skills")}>
-          Skills
-        </button>
-      </nav>
-      {tab() === "model" && (
-        <ModelSettingsForm
-          model={props.configuration.model}
-          routes={props.configuration.routes}
-          legacyModel={props.configuration.legacyModel}
-          dispatch={props.dispatch}
-        />
-      )}
-      {tab() === "connectors" && (
-        <McpConnectionList connectors={props.configuration.connectors} dispatch={props.dispatch} />
-      )}
-      {tab() === "skills" && <SkillList skills={props.configuration.skills} dispatch={props.dispatch} />}
+      <ModelSettingsForm
+        model={props.catalog.model}
+        routes={props.catalog.routes}
+        onSave={(settings) => props.actions.saveModelProfile(settings)}
+      />
     </section>
   );
 }

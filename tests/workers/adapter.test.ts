@@ -1,19 +1,14 @@
-// ADR-0002: the real pi-ai adapter executes inside workerd. This runs through
-// the same built-deployment pool as the rest of the worker tests and injects a
-// fixture fetch, so provider SDKs load and stream in the Workers runtime.
+// The gateway model factory executes inside workerd. This runs through the
+// same built-deployment pool as the rest of the worker tests and injects a
+// fixture fetch, so the registered provider and pi-ai API load and stream in
+// the Workers runtime.
 
 import { describe, expect, it } from "vitest";
-import type { AssistantMessage } from "@earendil-works/pi-ai";
-import { GatewayModelGateway } from "../../src/worker/models/GatewayModelGateway";
-import { resolveRoute } from "../../src/worker/models/ModelRoutes";
-import type { CanonicalModelRequest, ModelEvent } from "../../src/worker/models/types";
+import type { AssistantMessage, Context, SimpleStreamOptions } from "@earendil-works/pi-ai";
+import { createGatewayModels, type GatewayModelOptions } from "../../src/worker/models";
 
 function sse(events: unknown[]): string {
-  return (
-    events
-      .map((data) => `data: ${JSON.stringify(data)}\n\n`)
-      .join("") + "data: [DONE]\n\n"
-  );
+  return events.map((data) => `data: ${JSON.stringify(data)}\n\n`).join("") + "data: [DONE]\n\n";
 }
 
 function chatChunk(delta: Record<string, unknown>, finishReason: string | null): unknown {
@@ -26,53 +21,40 @@ function chatChunk(delta: Record<string, unknown>, finishReason: string | null):
   };
 }
 
-function request(): CanonicalModelRequest {
-  const selection = resolveRoute({
-    route: "dynamic/runner",
-    provider: "deepseek",
-    modelId: "deepseek-flash",
-  });
-  return {
-    version: 2,
-    attemptId: "attempt_workerd",
-    profile: {
-      kind: "route",
-      gatewayId: "gw1",
-      routeId: selection.routeId,
-      provider: selection.provider,
-      modelId: selection.modelId,
-      api: selection.api,
-      model: selection.model,
-      maxTokens: 256,
-    },
-    context: {
-      systemPrompt: "You are a test assistant.",
-      messages: [{ role: "user", content: "hello", timestamp: 1 }],
-      tools: [],
-    },
-  };
+function context(): Context {
+  return { messages: [{ role: "user", content: "hello", timestamp: 1 }] };
 }
 
-async function run(response: Response): Promise<{ message?: AssistantMessage; url?: string }> {
-  const gateway = new GatewayModelGateway({
-    fetch: () => async (input: RequestInfo | URL, init?: RequestInit) => {
-      void init;
-      const url =
-        typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
-      (globalThis as Record<string, unknown>).__adapterUrl = url;
-      return response;
-    },
-  });
-  const controller = new AbortController();
-  let message: AssistantMessage | undefined;
-  for await (const event of gateway.stream(request(), controller.signal) as AsyncIterable<ModelEvent>) {
-    if (event.type === "completed") message = event.message;
+async function run(
+  response: Response,
+  options: GatewayModelOptions = {},
+  streamOptions: SimpleStreamOptions = {},
+): Promise<{ message?: AssistantMessage; url?: string; body?: Record<string, unknown> }> {
+  const originalFetch = globalThis.fetch;
+  let url: string | undefined;
+  let body: Record<string, unknown> | undefined;
+  globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    url =
+      typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+    if (init?.body && typeof init.body === "string") {
+      body = JSON.parse(init.body) as Record<string, unknown>;
+    }
+    return response;
+  }) as typeof fetch;
+  try {
+    const env = { MI_FIXTURE_MODEL_URL: "http://fixture.test" } as unknown as Env;
+    const models = createGatewayModels(env, options);
+    const model = models.getModel("gateway", "dynamic/runner");
+    expect(model).toBeDefined();
+    const message = await models.completeSimple(model!, context(), streamOptions);
+    return { message, url, body };
+  } finally {
+    globalThis.fetch = originalFetch;
   }
-  return { message, url: (globalThis as Record<string, unknown>).__adapterUrl as string | undefined };
 }
 
-describe("model adapter in workerd", () => {
-  it("streams a completed assistant message through the binding endpoint", async () => {
+describe("gateway models in workerd", () => {
+  it("registers dynamic/runner and streams through the fixture endpoint", async () => {
     const body = sse([
       chatChunk({ content: "hi from workerd" }, "stop"),
       { usage: { prompt_tokens: 4, completion_tokens: 3, total_tokens: 7 } },
@@ -80,9 +62,11 @@ describe("model adapter in workerd", () => {
     const { message, url } = await run(
       new Response(body, { status: 200, headers: { "content-type": "text/event-stream" } }),
     );
-    expect(url).toBe("https://workers-binding.ai/ai-gateway/gateways/gw1/compat/chat/completions");
+    expect(url).toBe("http://fixture.test/v1/chat/completions");
     expect(message?.stopReason).toBe("stop");
-    expect(message?.content.some((block) => block.type === "text" && block.text === "hi from workerd")).toBe(true);
+    expect(
+      message?.content.some((block) => block.type === "text" && block.text === "hi from workerd"),
+    ).toBe(true);
     expect(message?.usage.totalTokens).toBe(7);
   });
 
@@ -92,5 +76,27 @@ describe("model adapter in workerd", () => {
       new Response(body, { status: 200, headers: { "content-type": "text/event-stream" } }),
     );
     expect(message?.stopReason).toBe("error");
+  });
+
+  it("sends the configured output cap and thinking level", async () => {
+    const response = sse([
+      chatChunk({ content: "capped" }, "stop"),
+      { usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 } },
+    ]);
+    const { body } = await run(
+      new Response(response, { status: 200, headers: { "content-type": "text/event-stream" } }),
+      {
+        settings: {
+          kind: "route",
+          gatewayId: "gw1",
+          routeId: "dynamic/runner",
+          thinkingLevel: "high",
+          maxOutputTokens: 1234,
+        },
+      },
+      { reasoning: "high" },
+    );
+    expect(body?.max_completion_tokens ?? body?.max_tokens).toBe(1234);
+    expect(body?.reasoning_effort).toBe("high");
   });
 });

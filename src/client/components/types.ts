@@ -1,18 +1,30 @@
-import type { OwnerSnapshot } from "../../shared/domain";
-import type { DispatchResult } from "../commands/CommandDispatcher";
-import type { ConnectionStatus } from "../sync/ConversationFeed";
+import type {
+  AppError,
+  ConversationId,
+  ModelSettingsView,
+  RouteSettingsInput,
+} from "../../shared/domain";
+import type { SubmissionId } from "@earendil-works/pi-durable";
+import type { ConnectionStatus } from "../session/SessionFeed";
 
 export type AppView = "chat" | "settings";
 
+export interface DispatchResult {
+  status: "accepted" | "rejected" | "retry";
+  error?: AppError;
+}
+
 export interface AppActions {
-  dispatch(kind: string, payload: unknown): Promise<DispatchResult>;
+  createConversation(): Promise<DispatchResult>;
+  renameConversation(id: ConversationId, title: string): Promise<DispatchResult>;
+  deleteConversation(id: ConversationId): Promise<DispatchResult>;
+  submit(text: string, whenBusy: "followUp" | "steer"): Promise<void>;
+  withdraw(submissionId: SubmissionId): Promise<void>;
+  cancel(): Promise<void>;
+  saveModelProfile(settings: RouteSettingsInput): Promise<ModelSettingsView | undefined>;
   selectConversation(id?: string): void;
   setView(view: AppView): void;
   reconnect(): void;
 }
 
-export interface ScreenProps {
-  snapshot: OwnerSnapshot;
-  status: ConnectionStatus;
-  actions: AppActions;
-}
+export type { ConnectionStatus };

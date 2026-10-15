@@ -4,45 +4,45 @@
 
 import { createSignal, For, Show } from "solid-js";
 import type { JSX } from "@solidjs/web";
-import type { ModelRouteView, ModelSettingsView } from "../../shared/domain";
+import type { ModelRouteView, ModelSettingsView, RouteSettingsInput } from "../../shared/domain";
 
 export function ModelSettingsForm(props: {
   model?: ModelSettingsView;
   routes: ModelRouteView[];
-  legacyModel?: ModelSettingsFormLegacy;
-  dispatch: (kind: string, payload: unknown) => Promise<unknown>;
+  onSave: (settings: RouteSettingsInput) => Promise<ModelSettingsView | undefined>;
 }): JSX.Element {
   const initial = props.model;
   const [gatewayId, setGatewayId] = createSignal(initial?.gatewayId ?? "mi");
   const [routeId, setRouteId] = createSignal(initial?.routeId ?? props.routes[0]?.routeId ?? "");
   const [thinkingLevel, setThinkingLevel] = createSignal(initial?.thinkingLevel ?? "");
   const [saved, setSaved] = createSignal(false);
+  const [error, setError] = createSignal<string>();
 
   const selected = () => props.routes.find((route) => route.routeId === routeId());
+
+  const save = async () => {
+    setError(undefined);
+    setSaved(false);
+    try {
+      const level = thinkingLevel();
+      const settings: RouteSettingsInput = { gatewayId: gatewayId(), routeId: routeId() };
+      // The server-function codec rejects `undefined` members, so omit unset fields.
+      if (level !== "") settings.thinkingLevel = level;
+      await props.onSave(settings);
+      setSaved(true);
+    } catch (failure) {
+      setError(failure instanceof Error ? failure.message : "settings could not be saved");
+    }
+  };
 
   return (
     <form
       class="settings-form"
       onSubmit={(event) => {
         event.preventDefault();
-        const level = thinkingLevel();
-        void props
-          .dispatch("settings.save_model_profile", {
-            settings: {
-              gatewayId: gatewayId(),
-              routeId: routeId(),
-              thinkingLevel: level === "" ? undefined : level,
-            },
-          })
-          .then(() => setSaved(true));
+        void save();
       }}
     >
-      <Show when={props.legacyModel}>
-        <p class="settings-notice">
-          A historical concrete model profile is stored. Saving route settings below replaces it
-          for new requests; historical requests keep their frozen configuration.
-        </p>
-      </Show>
       <label>
         Gateway id
         <input value={gatewayId()} onInput={(event) => setGatewayId(event.currentTarget.value)} />
@@ -56,12 +56,13 @@ export function ModelSettingsForm(props: {
         </select>
       </label>
       <Show when={selected()}>
-        <p class="settings-note">
-          {(selected() as ModelRouteView).label} — context window{" "}
-          {(selected() as ModelRouteView).contextWindow.toLocaleString()} tokens
-        </p>
+        {(route) => (
+          <p class="settings-note">
+            {route().label} — context window {route().contextWindow.toLocaleString()} tokens
+          </p>
+        )}
       </Show>
-      <Show when={selected()?.thinkingLevels.length}>
+      <Show when={(selected()?.thinkingLevels.length ?? 0) > 0}>
         <label>
           Thinking level
           <select
@@ -79,16 +80,7 @@ export function ModelSettingsForm(props: {
         Save model settings
       </button>
       {saved() && <span class="saved">Saved</span>}
+      {error() && <p class="inline-error">{error()}</p>}
     </form>
   );
-}
-
-/** Historical concrete profile shape, displayed read-only (ADR-0002). */
-export interface ModelSettingsFormLegacy {
-  gatewayId: string;
-  provider: string;
-  model: string;
-  protocol: string;
-  contextWindow: number;
-  maxOutputTokens: number;
 }

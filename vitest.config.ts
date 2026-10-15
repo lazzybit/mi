@@ -23,6 +23,9 @@ export default defineConfig({
             main: "./dist/server/server.js",
             remoteBindings: false,
             wrangler: { configPath: "./wrangler.jsonc" },
+            // Test-only fixture routing, so the session's fixture hooks and the
+            // model factory's fixture transport are enabled in workerd tests.
+            miniflare: { bindings: { MI_FIXTURE_MODEL_URL: "http://fixture.test" } },
           }),
         ],
         test: {
