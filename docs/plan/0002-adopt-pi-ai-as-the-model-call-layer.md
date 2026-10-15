@@ -1,7 +1,7 @@
 # Plan-0002: Adopt @earendil-works/pi-ai as the model call layer
 
 - Created Date: 2026-10-15
-- Status: Draft
+- Status: Approved
 
 ## Target
 
