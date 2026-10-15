@@ -11,7 +11,7 @@ import type {
   ConversationId,
   HistoryPage,
   HistoryQuery,
-  ModelProfileView,
+  ModelSettingsView,
   OwnerSnapshot,
   ResolveAttemptInput,
   RunId,
@@ -43,7 +43,7 @@ export interface OwnerRpc {
   cancelRun(command: CommandEnvelope<{ runId: RunId }>): Promise<CommandReceipt<void>>;
   resumeRun(command: CommandEnvelope<{ runId: RunId }>): Promise<CommandReceipt<void>>;
   resolveAttempt(command: CommandEnvelope<ResolveAttemptInput>): Promise<CommandReceipt<void>>;
-  saveModelProfile(command: CommandEnvelope<SaveModelProfileInput>): Promise<CommandReceipt<ModelProfileView>>;
+  saveModelProfile(command: CommandEnvelope<SaveModelProfileInput>): Promise<CommandReceipt<ModelSettingsView>>;
   saveConnector(command: CommandEnvelope<SaveConnectorInput>): Promise<CommandReceipt<{ connectorId: ConnectorId }>>;
   setConnectorEnabled(command: CommandEnvelope<SetConnectorEnabledInput>): Promise<CommandReceipt<void>>;
   createSkill(command: CommandEnvelope<CreateSkillInput>): Promise<CommandReceipt<SkillView>>;
@@ -87,7 +87,7 @@ export abstract class OwnerRpcBase implements OwnerRpc {
     return this.call<CommandReceipt<void>>("resolveAttempt", [command]);
   }
   saveModelProfile(command: CommandEnvelope<SaveModelProfileInput>) {
-    return this.call<CommandReceipt<ModelProfileView>>("saveModelProfile", [command]);
+    return this.call<CommandReceipt<ModelSettingsView>>("saveModelProfile", [command]);
   }
   saveConnector(command: CommandEnvelope<SaveConnectorInput>) {
     return this.call<CommandReceipt<{ connectorId: ConnectorId }>>("saveConnector", [command]);

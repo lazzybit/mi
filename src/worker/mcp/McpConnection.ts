@@ -6,7 +6,7 @@
 // unresolved tool invocation.
 
 import { globalFetch } from "./globalFetch";
-import { parseSse } from "../models/sse";
+import { parseSse } from "./sse";
 import type { McpConnection, NormalizedToolResult, ServerCapabilities, ToolPage } from "./types";
 
 const PROTOCOL_VERSION = "2025-06-18";

@@ -1,11 +1,12 @@
-// Settings service (PLAN.md -> Model boundary).
+// Settings service (ADR-0002). Model settings select an application-configured
+// route; the server resolves catalog metadata and never trusts client-supplied
+// model identities or limits.
 
-import { AppError, type ModelProfileView } from "../../shared/domain";
+import { AppError, type ModelSettingsView } from "../../shared/domain";
 import type { SaveModelProfileInput } from "../../shared/commands";
+import { defaultRouteSettings, resolveRouteById } from "../models/ModelRoutes";import type { StoredModelSettings } from "../context/ContextAssembler";
 import type { StoreTransaction } from "../storage/SqlStore";
 import type { ServiceDeps, ServiceOutcome } from "../conversations/services";
-
-const PROTOCOLS = new Set(["openai-responses", "openai-chat-completions", "anthropic-messages"]);
 
 export class SettingsService {
   constructor(private readonly deps: ServiceDeps) {}
@@ -13,19 +14,35 @@ export class SettingsService {
   saveModelProfile(
     tx: StoreTransaction,
     input: SaveModelProfileInput,
-  ): ServiceOutcome<ModelProfileView> {
-    const profile = input.profile;
-    if (!profile.gatewayId || !profile.provider || !profile.model) {
-      throw new AppError("INVALID_INPUT", "model profile requires gatewayId, provider, and model");
+  ): ServiceOutcome<ModelSettingsView> {
+    const settings = input.settings;
+    if (!settings.gatewayId || !settings.routeId) {
+      throw new AppError("INVALID_INPUT", "model settings require gatewayId and routeId");
     }
-    if (!PROTOCOLS.has(profile.protocol)) {
-      throw new AppError("NOT_CONFIGURED", `unsupported model protocol: ${profile.protocol}`);
+    if (settings.maxOutputTokens !== undefined && settings.maxOutputTokens <= 0) {
+      throw new AppError("INVALID_INPUT", "maxOutputTokens must be positive");
     }
-    if (profile.contextWindow <= 0 || profile.maxOutputTokens <= 0) {
-      throw new AppError("INVALID_INPUT", "contextWindow and maxOutputTokens must be positive");
+    // ADR-0002: server-side route validation against the repository mapping
+    // and the pinned catalog.
+    const selection = resolveRouteById(settings.routeId);
+    if (
+      settings.thinkingLevel !== undefined &&
+      !selection.thinkingLevels.includes(settings.thinkingLevel as never)
+    ) {
+      throw new AppError(
+        "INVALID_INPUT",
+        `thinking level ${settings.thinkingLevel} is not supported by ${selection.modelName}`,
+      );
     }
-    tx.settings.writeModelProfile(JSON.stringify(profile));
-    return { value: profile, changes: [] };
+    const stored: StoredModelSettings = {
+      kind: "route",
+      gatewayId: settings.gatewayId,
+      routeId: settings.routeId,
+      thinkingLevel: settings.thinkingLevel,
+      maxOutputTokens: settings.maxOutputTokens,
+    };
+    tx.settings.writeModelProfile(JSON.stringify(stored));
+    return { value: settingsView(stored, selection), changes: [] };
   }
 
   setWorkspaceRoot(tx: StoreTransaction, root: string): ServiceOutcome<void> {
@@ -37,3 +54,27 @@ export class SettingsService {
     void this.deps;
   }
 }
+
+/** Project the stored settings with resolved catalog metadata (ADR-0002). */
+export function settingsView(
+  stored: StoredModelSettings,
+  selection: { routeId: string; modelName: string; contextWindow: number; maxTokens: number; thinkingLevels: string[] },
+): ModelSettingsView {
+  if ("profile" in stored) {
+    throw new AppError("INVALID_INPUT", "legacy model profiles cannot be re-projected as routes");
+  }
+  return {
+    kind: "route",
+    gatewayId: stored.gatewayId,
+    routeId: selection.routeId,
+    label: selection.modelName,
+    thinkingLevel: stored.thinkingLevel,
+    maxOutputTokens: stored.maxOutputTokens,
+    contextWindow: selection.contextWindow,
+    maxTokens: selection.maxTokens,
+    thinkingLevels: selection.thinkingLevels,
+  };
+}
+
+/** The default route selection applied when nothing is configured (ADR-0002). */
+export { defaultRouteSettings };

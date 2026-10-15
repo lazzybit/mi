@@ -5,7 +5,6 @@ import type {
   ConnectorId,
   ConnectorAuthMode,
   ConversationId,
-  ModelProfileView,
   ResolveAttemptInput,
   RunId,
   SkillId,
@@ -39,8 +38,20 @@ export interface ResumeRunInput {
   runId: RunId;
 }
 
+/**
+ * ADR-0002: model settings select an application-configured route; the server
+ * resolves and validates catalog metadata. Client-supplied model metadata is
+ * not authoritative.
+ */
+export interface RouteSettingsInput {
+  gatewayId: string;
+  routeId: string;
+  thinkingLevel?: string;
+  maxOutputTokens?: number;
+}
+
 export interface SaveModelProfileInput {
-  profile: ModelProfileView;
+  settings: RouteSettingsInput;
 }
 
 export interface SaveConnectorInput {
