@@ -1,7 +1,7 @@
 # Plan-0004: Keep mi single-user and simplify authentication
 
 - Created Date: 2026-10-16
-- Status: In Progress
+- Status: Done
 
 ## Target
 
