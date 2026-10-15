@@ -96,15 +96,18 @@ Files: new `src/worker/models/ModelRoutes.ts`,
 and the existing settings RPC path.
 
 Define the application's route-to-catalog mapping in source. Initially,
-`dynamic/runner` targets `deepseek-v4.1-flash`. Each entry names an explicit
-provider-qualified pi-ai catalog reference. Store references, not copied
-tables of token limits, capabilities, compatibility flags, or prices.
+`dynamic/runner` maps to provider `deepseek`, model ID `deepseek-flash`
+(`deepseek/deepseek-flash`), resolved from
+`@earendil-works/pi-ai/providers/deepseek.models`.
+The catalog display name is `DeepSeek V4.1 Flash`; it is not the lookup ID.
+Store qualified references, not copies of limits, capabilities, thinking
+maps, compatibility flags, or pricing.
 
-Resolve and validate the mapping server-side using pi-ai's exported catalog
-data and helpers. Missing or ambiguous references are configuration errors
-to fix in the repository, not requests for end users to enter metadata.
-Do not assume the scoped Cloudflare or DeepSeek catalog contains an entry
-that inspection of the pinned package shows is absent.
+Resolve and validate this exact mapping server-side using pi-ai's exported
+catalog data and helpers. The pinned 1.2.0 DeepSeek catalog contains this
+model with API `openai-completions`. Missing references are repository
+configuration errors; do not search other host catalogs for approximate
+matches or ask users to enter metadata.
 
 Keep the catalog's metadata identity separate from the dispatched route.
 The initial route uses pi-ai's `openai-completions` API, the binding compat

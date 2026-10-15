@@ -101,10 +101,10 @@ durable execution engine in this repository.
    with its `ThinkingContent` and `ToolCall` content blocks. Entry metadata
    stores that message and `buildHistory` projects it back into a `Context`.
 6. The repository owns a route-to-catalog mapping. Its initial deployment
-   mapping is `dynamic/runner -> deepseek-v4.1-flash`.
-   Resolve model capabilities and limits from an explicit pi-ai catalog
-   reference; do not ask users to supply provider identifiers, model IDs,
-   protocols, context windows, or compatibility metadata.
+   mapping is `dynamic/runner -> deepseek/deepseek-flash`.
+   Resolve provider `deepseek` and model ID `deepseek-flash` from pi-ai's
+   scoped DeepSeek catalog. Do not ask users to supply provider identifiers,
+   model IDs, protocols, context windows, or compatibility metadata.
 
    Catalog identity and inference identity are distinct. Requests retain
    `model: "dynamic/runner"` and use the binding's OpenAI-compatible chat
@@ -185,7 +185,7 @@ decision and stays out of scope.
 
 Planning refinement: the deployment uses a configured dynamic route, not a
 user-entered concrete provider model. The user specified
-`dynamic/runner -> deepseek-v4.1-flash`. A repository-owned mapping plus
+`dynamic/runner -> deepseek/deepseek-flash`. A repository-owned mapping plus
 pi-ai catalog lookup replaces the initial blanket catalog exclusion and
 avoids requiring users to supply model metadata. Existing bundle probes
 did not measure these catalog imports; their actual contribution remains
