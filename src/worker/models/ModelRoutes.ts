@@ -28,6 +28,9 @@ export const ROUTE_MAPPINGS: readonly ModelRouteMapping[] = [
 
 export const DEFAULT_ROUTE_ID = ROUTE_MAPPINGS[0]?.route ?? "";
 
+/** The deployment's AI Gateway that fronts every configured route. */
+export const AI_GATEWAY_ID = "mi";
+
 /** The default route selection applied when nothing is configured (ADR-0002). */
 export interface RouteSettingsShape {
   kind: "route";
@@ -38,7 +41,7 @@ export interface RouteSettingsShape {
 }
 
 export function defaultRouteSettings(): RouteSettingsShape {
-  return { kind: "route", gatewayId: "default", routeId: DEFAULT_ROUTE_ID };
+  return { kind: "route", gatewayId: AI_GATEWAY_ID, routeId: DEFAULT_ROUTE_ID };
 }
 
 /**

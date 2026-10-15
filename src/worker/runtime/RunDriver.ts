@@ -16,10 +16,11 @@ import type {
   RunRecord,
 } from "../storage/records";
 import { projectAttempt, projectEntry, projectRun, projectSubmission } from "../storage/projections";
+import { conversationSummaryChange } from "../storage/ConversationProjection";
 import type { ContextAssembler } from "../context/ContextAssembler";
 import { compactionRequest } from "../context/ContextAssembler";
 import type { ContextBudget } from "../context/ContextBudget";
-import type { ToolExecutor, PreparedToolCall } from "../mcp/types";
+import type { ToolExecutor, PreparedToolCall, ToolExecutionOutcome } from "../mcp/types";
 import type {
   CanonicalModelRequest,
   ModelAttemptResult,
@@ -137,7 +138,13 @@ export class RunDriver {
           (run.state === "waiting_for_auth" || run.state === "needs_attention") &&
           selectable(run),
       );
-      if (blocked) return undefined;
+      if (blocked) {
+        console.error(
+          "mi.run.blocked",
+          JSON.stringify({ runId: blocked.id, state: blocked.state, phase: blocked.phase }),
+        );
+        return undefined;
+      }
       return active.find((run) => run.state === "queued" && selectable(run));
     });
     if (!selected) return "none";
@@ -238,6 +245,8 @@ export class RunDriver {
         conversationId: run.conversationId,
         values: tx.submissions.listQueuedForConversation(run.conversationId).map(projectSubmission),
       });
+      const summary = conversationSummaryChange(tx, run.conversationId);
+      if (summary) tx.changes.push(summary);
     });
     this.deps.publish(commit);
   }
@@ -294,6 +303,10 @@ export class RunDriver {
         conversationId: run.conversationId,
         value: projectRun(updated),
       });
+      // The conversation list derives its run badge from the summary, so every
+      // run transition must publish the updated summary too.
+      const summary = conversationSummaryChange(tx, run.conversationId);
+      if (summary) tx.changes.push(summary);
     });
     this.deps.publish(commit);
     return updated;
@@ -566,6 +579,15 @@ export class RunDriver {
       );
     } catch (error) {
       // A gateway/transport failure is a definite failure, not an interruption.
+      console.error(
+        "mi.model.transport_failure",
+        JSON.stringify({
+          runId: run.id,
+          attemptId: attempt.id,
+          code: error instanceof AppError ? error.code : "MODEL_ERROR",
+          message: error instanceof Error ? error.message : String(error),
+        }),
+      );
       this.settleModelFailure(
         run,
         attempt,
@@ -806,6 +828,16 @@ export class RunDriver {
     message: ModelAttemptResult["message"],
     errorCode: string,
   ): void {
+    console.error(
+      "mi.model.failure",
+      JSON.stringify({
+        runId: run.id,
+        attemptId: attempt.id,
+        errorCode,
+        stopReason: message.stopReason,
+        errorMessage: message.errorMessage ?? null,
+      }),
+    );
     const committed = this.deps.committer.close(attempt.id);
     const text = textOf(message) || committed;
     const commit = this.deps.store.transaction((tx) => {
@@ -865,6 +897,10 @@ export class RunDriver {
     reason: "error" | "deadline",
     errorMessage?: string,
   ): void {
+    console.error(
+      "mi.model.retry_scheduled",
+      JSON.stringify({ runId: run.id, attemptId: attempt.id, reason, errorMessage: errorMessage ?? null }),
+    );
     const now = this.deps.clock.now();
     let exhausted = false;
     const commit = this.deps.store.transaction((tx): AttemptRecord | "exhausted" | undefined => {
@@ -1106,9 +1142,20 @@ export class RunDriver {
       this.updateAttempt(run, attempt);
       await this.deps.wake.ensureWakeBy(this.deps.clock.now() + this.limits.recoveryWakeIntervalMs);
 
-      const outcome = await this.withExternalBudget(run.id, (signal) =>
-        this.deps.executor.executeTool(prepared, signal),
-      );
+      let outcome:
+        | { ok: true; value: ToolExecutionOutcome }
+        | { ok: false; reason: "cancelled" | "deadline" };
+      try {
+        outcome = await this.withExternalBudget(run.id, (signal) =>
+          this.deps.executor.executeTool(prepared, signal),
+        );
+      } catch (error) {
+        // A tool that rejects its arguments or fails locally must surface as a
+        // tool result so the model can react. Letting it escape the driver
+        // leaves the dispatched attempt and the run stuck in `running`.
+        this.settleToolError(run, attempt, tool, error);
+        return "continue";
+      }
 
       if (outcome.ok) {
         const resultJson = JSON.stringify(outcome.value);
@@ -1190,6 +1237,45 @@ export class RunDriver {
     });
     this.deps.publish(commit);
     this.applyTransition(run, { type: "remote_outcome_unknown", attemptId: attempt.id });
+  }
+
+  private settleToolError(
+    run: RunRecord,
+    attempt: AttemptRecord,
+    tool: PersistedToolCall,
+    error: unknown,
+  ): void {
+    const message = error instanceof Error ? error.message : "tool failed";
+    attempt.state = "failed";
+    attempt.errorCode = error instanceof AppError ? error.code : "TOOL_ERROR";
+    attempt.errorMessage = message;
+    attempt.updatedAt = this.deps.clock.now();
+    const commit = this.deps.store.transaction((tx) => {
+      if (!this.executionCurrent(tx, run, attempt)) return;
+      tx.attempts.update(attempt);
+      const entry = this.newEntry(
+        tx,
+        run,
+        "tool_result",
+        `Error: ${message}`,
+        attempt.id,
+        undefined,
+        tool.toolCallId,
+        tool.alias,
+        true,
+      );
+      tx.changes.push({
+        kind: "entry.append",
+        conversationId: run.conversationId,
+        value: projectEntry(entry),
+      });
+      tx.changes.push({
+        kind: "attempt.update",
+        conversationId: run.conversationId,
+        value: projectAttempt(attempt),
+      });
+    });
+    this.deps.publish(commit);
   }
 
   private recordToolError(run: RunRecord, tool: PersistedToolCall, error: unknown): void {
@@ -1318,6 +1404,9 @@ export class RunDriver {
     if (toolName !== undefined) entry.toolName = toolName;
     tx.entries.insert(entry);
     tx.conversations.touch(run.conversationId, this.deps.clock.now());
+    // Keep the conversation list preview in step with appended entries.
+    const summary = conversationSummaryChange(tx, run.conversationId);
+    if (summary) tx.changes.push(summary);
     return entry;
   }
 

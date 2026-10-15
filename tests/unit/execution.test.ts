@@ -2,15 +2,52 @@ import { describe, expect, it } from "vitest";
 import { AppError } from "../../src/shared/domain";
 import type { ModelEvent, ModelGateway, ModelRequest } from "../../src/worker/models/types";
 import { OutputCommitter } from "../../src/worker/runtime/OutputCommitter";
+import { emptyCheckpoint } from "../../src/worker/conversations/services";
+import { decodeServerFrame } from "../../src/shared/wire";
+import type { SyncSocket } from "../../src/worker/sync/SyncHub";
 import {
   FakeModelGateway,
+  TEST_MODEL_PROFILE,
   assistantFixture,
   bootstrapConversation,
   createTestRuntime,
   envelope,
 } from "../helpers/runtime";
 
+class RecordingSocket implements SyncSocket {
+  readonly messages: string[] = [];
+  send(data: string): void {
+    this.messages.push(data);
+  }
+  close(): void {}
+}
+
 describe("durable submission and execution", () => {
+  it("publishes the conversation summary when the run state changes", async () => {
+    const { runtime, model } = createTestRuntime();
+    const { conversationId } = await bootstrapConversation(runtime);
+    const socket = new RecordingSocket();
+    runtime.sync.attach(socket, socket, conversationId);
+    model.pushText("done");
+
+    await runtime.dispatch("submit", [envelope({ conversationId, text: "hi", mode: "queue" })]);
+    await runtime.alarm();
+
+    const states: (string | undefined)[] = [];
+    for (const message of socket.messages) {
+      const frame = decodeServerFrame(message);
+      if (frame?.type !== "changes") continue;
+      for (const change of frame.changes) {
+        if (change.kind === "conversation.upsert" && change.value.id === conversationId) {
+          states.push(change.value.activeRunState);
+        }
+      }
+    }
+    expect(states).toContain("queued");
+    expect(states).toContain("running");
+    expect(states.at(-1)).toBeUndefined();
+  });
+
   it("acknowledges a queue submission with a run id, then executes it", async () => {
     const { runtime, model } = createTestRuntime();
     const { conversationId } = await bootstrapConversation(runtime);
@@ -29,6 +66,23 @@ describe("durable submission and execution", () => {
     expect(assistant?.text).toBe("hello there");
     expect(snapshot.selectedConversation?.activeRun).toBeUndefined();
     expect(model.requests).toHaveLength(1);
+  });
+
+  it("reports the executing run when a later submission is queued", async () => {
+    const { runtime, model } = createTestRuntime();
+    const { conversationId } = await bootstrapConversation(runtime);
+    let observed: string | undefined;
+    model.push(() => {
+      observed = runtime.store.read((tx) => tx.runs.activeForConversation(conversationId))?.state;
+      return [{ type: "completed", message: assistantFixture({ text: "done" }) }];
+    });
+    model.push(() => [{ type: "completed", message: assistantFixture({ text: "done2" }) }]);
+
+    await runtime.dispatch("submit", [envelope({ conversationId, text: "one", mode: "queue" })]);
+    await runtime.dispatch("submit", [envelope({ conversationId, text: "two", mode: "queue" })]);
+    await runtime.alarm();
+
+    expect(observed).toBe("running");
   });
 
   it("runs a tool round and then finishes", async () => {
@@ -52,6 +106,31 @@ describe("durable submission and execution", () => {
     const assistant = snapshot.selectedConversation?.entries.filter((e) => e.kind === "assistant");
     expect(assistant?.at(-1)?.text).toBe("the file says hi");
     expect(tools.calls).toHaveLength(1);
+  });
+
+  it("surfaces a tool execution error instead of leaving the run running", async () => {
+    const { runtime, model, tools } = createTestRuntime();
+    const { conversationId } = await bootstrapConversation(runtime);
+    tools.register("broken", {
+      remoteName: "broken",
+      replayPolicy: "safe",
+      handler: () => {
+        throw new AppError("INVALID_INPUT", "skillId must be a non-empty string");
+      },
+    });
+    model.pushText("calling", [{ toolCallId: "call_1", name: "broken", arguments: {} }]);
+    model.pushText("recovered");
+
+    await runtime.dispatch("submit", [envelope({ conversationId, text: "go", mode: "queue" })]);
+    await runtime.alarm();
+
+    const snapshot = runtime.store.readSnapshot(conversationId);
+    const errorEntry = snapshot.selectedConversation?.entries.find(
+      (entry) => entry.kind === "tool_result" && entry.isError,
+    );
+    expect(errorEntry?.text).toContain("skillId must be a non-empty string");
+    expect(snapshot.selectedConversation?.activeRun).toBeUndefined();
+    expect(model.requests).toHaveLength(2);
   });
 
   it("persists dispatch intent before an external effect", async () => {
@@ -78,6 +157,60 @@ describe("durable submission and execution", () => {
     await runtime.dispatch("submit", [envelope({ conversationId, text: "go", mode: "queue" })]);
     await runtime.alarm();
     expect(observedAttemptState).toBe("dispatched");
+  });
+});
+
+describe("legacy stored profile execution", () => {
+  it("dispatches a queued run when the stored settings are a bare pre-ADR-0002 profile", async () => {
+    const { runtime, model } = createTestRuntime();
+    runtime.store.transaction((tx) =>
+      tx.settings.writeModelProfile(JSON.stringify(TEST_MODEL_PROFILE)),
+    );
+    const created = (await runtime.dispatch("createConversation", [
+      envelope({ title: "Legacy" }),
+    ])) as { result: { conversationId: string } };
+    const conversationId = created.result.conversationId;
+    model.pushText("hello legacy");
+
+    const receipt = (await runtime.dispatch("submit", [
+      envelope({ conversationId, text: "hi", mode: "queue" }),
+    ])) as { result: { state: string } };
+    expect(receipt.result.state).toBe("queued");
+
+    await runtime.alarm();
+
+    const snapshot = runtime.store.readSnapshot(conversationId);
+    expect(model.requests).toHaveLength(1);
+    expect(snapshot.selectedConversation?.activeRun).toBeUndefined();
+    expect(snapshot.selectedConversation?.entries.some((e) => e.text === "hello legacy")).toBe(true);
+  });
+});
+
+describe("queued dispatch with an unresolved run", () => {
+  it("does not start a queued run while another run needs attention", async () => {
+    const { runtime, model } = createTestRuntime();
+    const { conversationId } = await bootstrapConversation(runtime);
+    runtime.store.transaction((tx) =>
+      tx.runs.insert({
+        id: "run_attention",
+        conversationId,
+        state: "needs_attention",
+        phase: "request_model",
+        checkpoint: emptyCheckpoint(),
+        generation: 0,
+        createdAt: 0,
+        updatedAt: 0,
+      }),
+    );
+    model.pushText("should not run");
+
+    const receipt = (await runtime.dispatch("submit", [
+      envelope({ conversationId, text: "hi", mode: "queue" }),
+    ])) as { result: { runId: string } };
+    await runtime.alarm();
+
+    expect(model.requests).toHaveLength(0);
+    expect(runtime.store.read((tx) => tx.runs.get(receipt.result.runId))?.state).toBe("queued");
   });
 });
 

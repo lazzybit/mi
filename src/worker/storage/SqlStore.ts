@@ -4,7 +4,7 @@
 
 import type { ConfigurationStatusView, ConversationId, OwnerSnapshot } from "../../shared/domain";
 import type { ViewChange } from "../../shared/wire";
-import { all, parseJson, run } from "./Sql";
+import { all, run } from "./Sql";
 import type { StorageBackend, SqlExecutor } from "./Sql";
 import {
   ArtifactRepository,
@@ -35,7 +35,7 @@ import {
   projectSubmission,
 } from "./projections";
 import { projectConversationSummary } from "./ConversationProjection";
-import type { StoredModelSettings } from "../context/ContextAssembler";
+import { parseStoredSettings } from "../models/StoredSettings";
 import { defaultRouteSettings, listRouteViews, resolveRouteById } from "../models/ModelRoutes";
 
 export interface StoreTransaction {
@@ -75,7 +75,7 @@ export interface Commit<T> {
  */
 export function buildConfiguration(tx: StoreTransaction): ConfigurationStatusView {
   const settings = tx.settings.read();
-  const stored = parseJson<StoredModelSettings | undefined>(settings.modelProfileJson, undefined);
+  const stored = parseStoredSettings(settings.modelProfileJson);
   const connectors = tx.mcpServers.list().map((record) => ({
     id: record.id,
     name: record.name,

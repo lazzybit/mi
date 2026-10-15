@@ -4,7 +4,8 @@
 
 import { AppError, type ModelSettingsView } from "../../shared/domain";
 import type { SaveModelProfileInput } from "../../shared/commands";
-import { defaultRouteSettings, resolveRouteById } from "../models/ModelRoutes";import type { StoredModelSettings } from "../context/ContextAssembler";
+import { defaultRouteSettings, resolveRouteById } from "../models/ModelRoutes";
+import type { StoredModelSettings } from "../models/StoredSettings";
 import type { StoreTransaction } from "../storage/SqlStore";
 import type { ServiceDeps, ServiceOutcome } from "../conversations/services";
 

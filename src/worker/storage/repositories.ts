@@ -440,11 +440,18 @@ export class RunRepository {
   }
 
   activeForConversation(conversationId: string): RunRecord | undefined {
+    // Mirror the driver's selection so the client shows the run that is
+    // actually executing: the running run first, then an unresolved run that
+    // blocks execution, then the oldest queued run (the driver picks the
+    // oldest). Ordering by created_at alone would surface a newer queued run
+    // while an older run is executing.
     return mapRun(
       first<RunRow>(
         this.sql,
         `SELECT * FROM runs WHERE conversation_id = ? AND state IN ('queued','running','waiting_for_auth','needs_attention')
-         ORDER BY created_at DESC LIMIT 1`,
+         ORDER BY CASE state WHEN 'running' THEN 0 WHEN 'waiting_for_auth' THEN 1 WHEN 'needs_attention' THEN 1 ELSE 2 END,
+                  created_at ASC
+         LIMIT 1`,
         conversationId,
       ),
     );

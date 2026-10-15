@@ -13,7 +13,7 @@ export function ModelSettingsForm(props: {
   dispatch: (kind: string, payload: unknown) => Promise<unknown>;
 }): JSX.Element {
   const initial = props.model;
-  const [gatewayId, setGatewayId] = createSignal(initial?.gatewayId ?? "default");
+  const [gatewayId, setGatewayId] = createSignal(initial?.gatewayId ?? "mi");
   const [routeId, setRouteId] = createSignal(initial?.routeId ?? props.routes[0]?.routeId ?? "");
   const [thinkingLevel, setThinkingLevel] = createSignal(initial?.thinkingLevel ?? "");
   const [saved, setSaved] = createSignal(false);

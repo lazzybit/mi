@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { env } from "cloudflare:test";
+import { env, runInDurableObject } from "cloudflare:test";
 
 async function rpc(
   stub: DurableObjectStub,
@@ -94,6 +94,45 @@ describe("OwnerObject RPC", () => {
     ]);
     expect(missing.status).toBe(404);
     expect(missing.body.error?.code).toBe("NOT_FOUND");
+  });
+
+  it("upgrades a WebSocket and sends a snapshot for a bare legacy profile", async () => {
+    const stub = ownerStub("owner-legacy-ws");
+    // Initialize the object so the schema exists, then seed the historical
+    // bare profile JSON exactly as the pre-ADR-0002 writer persisted it.
+    await rpc(stub, "snapshot", []);
+    await runInDurableObject(stub, (_instance, state) => {
+      state.storage.sql.exec(
+        "UPDATE settings SET model_profile_json = ? WHERE id = 1",
+        JSON.stringify({
+          gatewayId: "legacy-gateway",
+          provider: "legacy-provider",
+          model: "legacy-model",
+          protocol: "openai-chat-completions",
+          contextWindow: 128_000,
+          maxOutputTokens: 4_096,
+        }),
+      );
+    });
+
+    const response = await stub.fetch("https://owner.internal/ws", {
+      headers: { Upgrade: "websocket", "x-mi-owner": "owner-legacy-ws" },
+    });
+    expect(response.status).toBe(101);
+    const socket = response.webSocket;
+    expect(socket).toBeDefined();
+    socket!.accept();
+    const frame = await new Promise<string>((resolve) => {
+      socket!.addEventListener("message", (event) => resolve(event.data as string), { once: true });
+    });
+    socket!.close();
+
+    const parsed = JSON.parse(frame) as {
+      type: string;
+      value: { configuration: { legacyModel?: { model: string } } };
+    };
+    expect(parsed.type).toBe("snapshot");
+    expect(parsed.value.configuration.legacyModel?.model).toBe("legacy-model");
   });
 
   it("persists a submission across a fresh request to the same object", async () => {

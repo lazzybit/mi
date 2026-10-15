@@ -111,6 +111,40 @@ describe("SqlStore", () => {
     expect(store.read((tx) => tx.commands.find("cmd-legacy"))?.outcome).toBe("accepted");
   });
 
+  it("reads a snapshot when the stored settings are a bare pre-ADR-0002 profile", () => {
+    const { store } = newStore();
+    // Historical owners persisted the concrete profile JSON directly (no
+    // `kind: "route"` and no `profile` wrapper). It has no routeId and must
+    // never be resolved as a route.
+    store.transaction((tx) =>
+      tx.settings.writeModelProfile(
+        JSON.stringify({
+          gatewayId: "legacy-gateway",
+          provider: "legacy-provider",
+          model: "legacy-model",
+          protocol: "openai-chat-completions",
+          contextWindow: 128_000,
+          maxOutputTokens: 4_096,
+        }),
+      ),
+    );
+
+    const snapshot = store.readSnapshot();
+    expect(snapshot.configuration.legacyModel).toMatchObject({
+      gatewayId: "legacy-gateway",
+      model: "legacy-model",
+    });
+    expect(snapshot.configuration.model).toBeUndefined();
+    expect(snapshot.configuration.routes.length).toBeGreaterThan(0);
+  });
+
+  it("reads a snapshot with the default route when no settings are stored", () => {
+    const { store } = newStore();
+    const snapshot = store.readSnapshot();
+    expect(snapshot.configuration.model?.routeId).toBe("dynamic/runner");
+    expect(snapshot.configuration.legacyModel).toBeUndefined();
+  });
+
   it("enforces command receipt idempotency at the storage level", () => {
     const { store } = newStore();
     store.transaction((tx) =>

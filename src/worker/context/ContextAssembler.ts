@@ -15,9 +15,9 @@ import type {
 import type { StoreTransaction } from "../storage/SqlStore";
 import type { EntryRecord, RunRecord } from "../storage/records";
 import { parseJson } from "../storage/Sql";
-import type { ModelProfile } from "../types";
 import type { Clock, IdGenerator } from "../runtime/Clock";
-import { resolveRouteById, defaultRouteSettings, type RouteSettingsShape } from "../models/ModelRoutes";
+import { resolveRouteById, defaultRouteSettings } from "../models/ModelRoutes";
+import { parseStoredSettings, type StoredModelSettings } from "../models/StoredSettings";
 import { ContextBudget, CompactionPlanner, type CompactionPlan } from "./ContextBudget";
 
 export interface PromptSection {
@@ -43,8 +43,6 @@ export interface ContextAssemblerDeps {
  * The stored settings profile: either an ADR-0002 route selection or a
  * historical concrete model profile.
  */
-export type StoredModelSettings = RouteSettingsShape | { profile: ModelProfile };
-
 export class ContextAssembler {
   constructor(private readonly deps: ContextAssemblerDeps) {}
 
@@ -234,25 +232,6 @@ export class ContextAssembler {
     }
     return resolved;
   }
-}
-
-/**
- * Read stored settings in every historical shape (ADR-0002): route settings,
- * a wrapped legacy profile, or the bare legacy profile JSON.
- */
-export function parseStoredSettings(json: string | undefined): StoredModelSettings | undefined {
-  const raw = parseJson<Record<string, unknown> | undefined>(json, undefined);
-  if (!raw || typeof raw !== "object") return undefined;
-  if (raw.kind === "route" && typeof raw.routeId === "string") {
-    return raw as unknown as StoredModelSettings;
-  }
-  if ("profile" in raw && typeof raw.profile === "object" && raw.profile !== null) {
-    return { profile: raw.profile as unknown as ModelProfile };
-  }
-  if (typeof raw.protocol === "string" && typeof raw.model === "string") {
-    return { profile: raw as unknown as ModelProfile };
-  }
-  return undefined;
 }
 
 function sectionsText(sections: PromptSection[]): string {
