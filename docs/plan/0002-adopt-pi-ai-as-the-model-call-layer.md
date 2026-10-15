@@ -19,7 +19,8 @@ Completion requires:
 - ADR-0001 deletion, generation fencing, and atomic artifact-linking guarantees continue to hold.
 - The automated checks and production bundle inspection below pass.
 
-This work cycle prepares documentation only. Creating this Draft PLAN does not authorize implementation. The approval questions below must be resolved before the plan becomes Approved.
+This work cycle prepares documentation only. Creating or revising this Draft
+PLAN does not authorize implementation.
 
 Live-account binding validation is separate from offline completion and requires configured infrastructure and explicit authorization.
 
@@ -43,9 +44,24 @@ Keep `ModelGateway.stream(request, signal)` as the execution boundary. `GatewayM
 
 Use `createModels` and `createProvider` with keyless binding authentication and only the three required lazy APIs. The Models entry point normalizes a public `Context` before dispatch; raw contexts must not be passed directly to lazy `ProviderStreams`, which require `TranscriptContext`.
 
-pi-ai owns provider encoding, stream interpretation, authoritative assistant messages, usage, thinking controls, and provider error classification.
+pi-ai owns provider encoding, stream interpretation, authoritative assistant
+messages, usage, thinking controls, continuation handling, and provider error
+classification. Use its exported APIs and helpers directly, including
+`isRetryableAssistantError`, `retryDelayMs`, and model capability helpers
+where applicable. Do not create replacement provider codecs, stream parsers,
+message models, capability tables, error classifiers, or backoff algorithms.
 
-This repository owns frozen request artifacts, attempts, output commitment, tool dispatch, retry policy, cancellation, recovery, context preparation, and compaction. Keep the existing `RunMachine` states and events; model retry bookkeeping remains in the driver and storage layer.
+This repository owns frozen request artifacts, durable attempts, output
+commitment, tool dispatch, retry eligibility, cancellation, recovery, context
+preparation, and compaction. Driver-owned durable scheduling consumes pi-ai's
+classification and delay results; it is not a second provider retry engine.
+Keep SDK retries disabled so each network attempt has its own durable record.
+Keep the existing `RunMachine` states and events.
+
+Runtime imports from `/utils/retry` and erased root type imports are permitted
+as clarified in ADR-0002. The necessary model-path driver, recovery,
+checkpoint, scheduling, and context-guard changes are within this plan's
+scope. None requires a separate architectural decision.
 
 New requests use canonical pi-ai `Context` messages. New assistant entry metadata stores a versioned canonical `AssistantMessage`. Legacy readers are compatibility boundaries, not a second write format.
 
@@ -230,7 +246,10 @@ A live binding smoke test must separately verify streaming, stored gateway crede
 
 ## Risks
 
-- **Accepted-decision ambiguity:** resolve the import and driver-scope questions below before approval; do not silently amend the ADR.
+- **Duplicated library responsibilities:** keep provider semantics in pi-ai.
+  Limit local code to transport wiring, legacy-data compatibility, projections,
+  and durable application responsibilities. Prefer exported library helpers
+  over equivalent local implementations.
 - **Runtime and bundle compatibility:** fixture probes do not establish the production build or real binding route. Require built Worker coverage and bundle inspection; report live validation separately.
 - **Historical continuation:** missing signatures cannot be recovered. Preserve readable history and explicitly limit legacy continuation guarantees.
 - **Retry races:** duplicate dispatch, lost wakes, or reset budgets can cause extra requests. Persist identity, eligibility, and settlement atomically and test reconstruction boundaries.
@@ -239,6 +258,4 @@ A live binding smoke test must separately verify streaming, stored gateway crede
 
 ## Open Questions
 
-1. May the ADR's import allowance include runtime imports from `@earendil-works/pi-ai/utils/retry`? The required `isRetryableAssistantError` and `retryDelayMs` are exported there, outside the currently enumerated subpaths.
-2. May core message/model types use erased `import type` declarations from the root? The inspected `/models` declaration does not re-export those types. Root runtime imports and provider catalogs would remain prohibited.
-3. Does “RunDriver durable flow unchanged” permit the model-only driver, recovery, checkpoint, scheduling, and context-guard corrections described here? This plan preserves the durable ownership model and `RunMachine` transitions, but cannot implement working durable retries by changing the adapter alone.
+None.

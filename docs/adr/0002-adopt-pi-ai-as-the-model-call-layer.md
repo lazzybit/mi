@@ -80,16 +80,19 @@ durable execution engine in this repository.
    thinking control, stop reasons, and error classification come from pi-ai.
 2. This repository keeps a thin adapter that implements the existing
    `ModelGateway` interface, mapping pi-ai stream events onto `ModelEvent` and
-   `AttemptExecutor`. `RunMachine` and the `RunDriver` durable flow are
-   unchanged.
+   `AttemptExecutor`. `RunMachine` and the repository's durable ownership
+   model remain unchanged. Model-path changes to `RunDriver`, recovery,
+   checkpoints, and wake scheduling integrate pi-ai outcomes and correct the
+   identified retry defects; they do not reimplement provider semantics.
 3. Transport uses `createAiBindingFetch` and
    `CLOUDFLARE_GATEWAY_BINDING_AUTH_SENTINEL` from
    `api/cloudflare-ai-binding`, addressing
    `https://workers-binding.ai/ai-gateway/gateways/{gateway}/{provider}/...`,
    so requests stay pre-authenticated by the binding and carry no provider key.
-4. Imports are limited to `@earendil-works/pi-ai/models`, `/api/*.lazy`, and
-   `/api/cloudflare-ai-binding`; the root entrypoint and provider catalogs are
-   not imported.
+4. Runtime imports use `@earendil-works/pi-ai/models`, the three required
+   `/api/*.lazy` modules, `/api/cloudflare-ai-binding`, and `/utils/retry`.
+   Core types may use erased `import type` declarations from the root.
+   The root runtime entrypoint and provider catalogs are not imported.
 5. The canonical persisted assistant message becomes pi-ai's `AssistantMessage`
    with its `ThinkingContent` and `ToolCall` content blocks. Entry metadata
    stores that message and `buildHistory` projects it back into a `Context`.
