@@ -18,6 +18,7 @@ Completion requires:
 - Context checks cover structured content and effective output reservations; requests known to exceed the configured budget do not dispatch.
 - ADR-0001 deletion, generation fencing, and atomic artifact-linking guarantees continue to hold.
 - The automated checks and production bundle inspection below pass.
+- Normal model setup uses repository-configured routes and catalog-derived metadata, without requiring users to know provider protocols or token limits.
 
 This work cycle prepares documentation only. Creating or revising this Draft
 PLAN does not authorize implementation.
@@ -73,7 +74,10 @@ Files: `package.json`, `package-lock.json`, `src/worker/models/GatewayModelGatew
 
 Pin `@earendil-works/pi-ai` to `1.2.0` and align the development Node requirement with its declared engine.
 
-Construct only the configured model and provider; do not register catalogs, discover models, introduce credential storage, or add the `agents` package.
+Load the catalog entries referenced by the configured routes and construct
+the binding-authenticated provider for the existing APIs. Do not activate
+catalog provider factories' credential discovery or add the `agents`
+package solely to obtain model metadata.
 
 Map `openai-chat-completions` to pi-ai's `openai-completions` API. Use the Responses and Anthropic lazy APIs for the other existing protocols.
 
@@ -85,17 +89,56 @@ Remove `models/codecs/*`, `models/sse.ts`, `AiBindingTransport.ts`, `HttpGateway
 
 **2. Profiles and configuration**
 
-Files: `src/shared/domain.ts`, `src/shared/commands.ts`, `src/worker/types.ts`, `src/worker/settings/SettingsService.ts`, `src/client/components/ModelSettingsForm.tsx`, and configuration projections.
+Files: new `src/worker/models/ModelRoutes.ts`,
+`src/shared/domain.ts`, `src/shared/commands.ts`,
+`src/worker/types.ts`, `src/worker/settings/SettingsService.ts`,
+`src/client/components/ModelSettingsForm.tsx`, configuration projections,
+and the existing settings RPC path.
 
-Add an explicit thinking level and the validated model capability/compatibility metadata needed to construct a custom pi-ai model without catalogs. Expose these through the existing settings form, not a separate settings subsystem.
+Define the application's route-to-catalog mapping in source. Initially,
+`dynamic/runner` targets `deepseek-v4.1-flash`. Each entry names an explicit
+provider-qualified pi-ai catalog reference. Store references, not copied
+tables of token limits, capabilities, compatibility flags, or prices.
 
-Normalize historical profiles centrally, including profiles stored in snapshots and request artifacts. Missing thinking configuration means off. Extended thinking levels require explicit support; unsupported configurations must not silently become a different request.
+Resolve and validate the mapping server-side using pi-ai's exported catalog
+data and helpers. Missing or ambiguous references are configuration errors
+to fix in the repository, not requests for end users to enter metadata.
+Do not assume the scoped Cloudflare or DeepSeek catalog contains an entry
+that inspection of the pinned package shows is absent.
 
-Provide explicit compatibility overrides for gateway providers whose behavior cannot be inferred from the binding URL. Preserve system-role compatibility for unknown Chat-compatible endpoints rather than assuming they accept `developer`.
+Keep the catalog's metadata identity separate from the dispatched route.
+The initial route uses pi-ai's `openai-completions` API, the binding compat
+base URL, and `model: "dynamic/runner"`. Never dispatch the catalog host's
+URL or replace the route with its underlying model ID. Isolate the thin
+transport overrides; do not blindly carry host-specific compatibility
+settings across endpoints.
 
-Validate finite positive integer limits and valid thinking/output combinations. Pass the configured output limit explicitly in stream options as well as model metadata.
+Replace required provider, model, protocol, context-window, and output-limit
+inputs with selection from the configured routes. With one configured route,
+select it by default and display its catalog-derived model name.
+Gateway infrastructure configuration remains separate. Expose supported
+thinking choices through pi-ai's capability helpers. Apply the existing
+application output default, bounded by catalog limits, without requiring a
+numeric value during normal setup.
 
-Use zero pricing coefficients only as pi-ai's required fallback for unknown prices, with separate `pricingKnown: false` metadata. A calculated zero must not be presented as known free usage.
+Keep catalogs and SDK runtime server-side. Project only the serializable
+route choices and display metadata needed by the settings interface.
+The server validates the selected route; client-supplied model metadata is
+not authoritative.
+
+Freeze the selected route, qualified catalog reference, resolved model,
+and effective options in snapshots and request artifacts. Retries reuse
+that configuration after settings or package changes. This freezes the
+local request, not the gateway's independently editable route definition.
+
+Preserve historical profiles and frozen requests through explicit readers.
+Do not force unrelated legacy profiles into the new mapping or expose the
+legacy raw-metadata editor as normal onboarding.
+
+Catalog prices are source-specific estimates, not proof of the gateway's
+actual bill. Preserve their provenance and unknown-pricing semantics for
+legacy/custom records. The route mapping describes the configured deployment;
+it does not prove which upstream model a future routed response used.
 
 **3. Canonical contracts and execution**
 
@@ -212,6 +255,7 @@ Extend the existing suites with focused adapter and persistence coverage:
 - Structured context budgeting, no-plan refusal, compaction-request validation, safe source ranges, uncompacted-tail preservation, and bounded progress.
 - ADR-0001 artifact-reference, atomic-linking, deletion, stale-generation, and late-output regressions.
 - Built Worker adapter execution with fixture fetches, plus browser settings persistence, streaming, tool rounds, failure, cancellation, and reload behavior.
+- Default `dynamic/runner` selection, qualified catalog lookup, supported thinking choices, server-side selection validation, and exact binding routing with `model: "dynamic/runner"`. Cover missing mappings, missing catalog entries, incompatible metadata sources, frozen configuration, and legacy-profile compatibility.
 
 ## Verification
 
@@ -229,7 +273,9 @@ After implementation is authorized:
 3. Run `npm run test:unit`.
 4. Run `npm run test:workers`, which includes the application build.
 5. Run `npm run test:e2e`.
-6. Inspect production imports and emitted chunks; confirm no root runtime import, provider catalogs, or pi-ai browser runtime dependency.
+6. Inspect production imports and emitted chunks. Confirm no root runtime
+   import, unintended credential flows, or pi-ai browser runtime dependency.
+   Measure the actual contribution of the selected catalog imports.
 7. Run a Wrangler deployment dry-run against the build-emitted Worker configuration. Record upload size and compare it with current [Workers limits](https://developers.cloudflare.com/workers/platform/limits/).
 
 Record actual results in the eventual IMPL; planned commands are not evidence of passing checks.
@@ -240,7 +286,8 @@ A live binding smoke test must separately verify streaming, stored gateway crede
 
 - Implementation, deployment, merge, claim release, or creation of an IMPL during this planning cycle.
 - Replacing the durable runtime with pi-agent-core, pi-durable, or Cloudflare Agents.
-- Additional model protocols, catalogs, provider authentication, fallback policies, or deferred responses.
+- Additional model protocols, provider authentication, fallback policies, or deferred responses.
+- Gateway route creation, remote route discovery, and Cloudflare management API credentials. Route definitions remain deployment-managed.
 - Artifact ownership redesign, global cleanup, historical ownership backfill, or unrelated TODO work.
 - General tool recovery redesign, multimodal support, usage dashboards, or reasoning-display features.
 
@@ -255,6 +302,7 @@ A live binding smoke test must separately verify streaming, stored gateway crede
 - **Retry races:** duplicate dispatch, lost wakes, or reset budgets can cause extra requests. Persist identity, eligibility, and settlement atomically and test reconstruction boundaries.
 - **Budget estimation:** configured limits and conservative estimates cannot eliminate provider-side overflow. Fail explicitly and avoid identical-request retry loops.
 - **Reference regressions:** canonical metadata changes can undermine deletion safety. Maintain explicit readers and tests for both old and new representations.
+- **Route/catalog drift:** the gateway route can change independently of the code mapping, and host catalogs can differ for the same named model. Validate qualified references, preserve metadata provenance, update the mapping with deployment changes, and record actual response model metadata where available. Do not infer actual upstream identity or billing from the mapping alone.
 
 ## Open Questions
 

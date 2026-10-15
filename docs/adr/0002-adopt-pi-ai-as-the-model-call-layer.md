@@ -89,16 +89,34 @@ durable execution engine in this repository.
    `api/cloudflare-ai-binding`, addressing
    `https://workers-binding.ai/ai-gateway/gateways/{gateway}/{provider}/...`,
    so requests stay pre-authenticated by the binding and carry no provider key.
-4. Runtime imports use `@earendil-works/pi-ai/models`, the three required
-   `/api/*.lazy` modules, `/api/cloudflare-ai-binding`, and `/utils/retry`.
-   Core types may use erased `import type` declarations from the root.
-   The root runtime entrypoint and provider catalogs are not imported.
+4. Reuse pi-ai catalogs for model metadata referenced by repository-configured
+   routes. Prefer the required provider-scoped `/providers/*.models` imports;
+   use `/providers/all` when necessary and assess the emitted bundle.
+   Runtime imports also use `/models`, the three required `/api/*.lazy`
+   modules, `/api/cloudflare-ai-binding`, and `/utils/retry`.
+   Core types may use erased root `import type` declarations.
+   Do not import the root runtime entrypoint or activate provider credential
+   discovery merely to obtain catalog metadata.
 5. The canonical persisted assistant message becomes pi-ai's `AssistantMessage`
    with its `ThinkingContent` and `ToolCall` content blocks. Entry metadata
    stores that message and `buildHistory` projects it back into a `Context`.
-6. `ModelProfile` maps onto a pi-ai `Model`: protocol to `api`, `gatewayId` to
-   the binding base URL, `maxOutputTokens` to `maxTokens`, plus an explicit
-   thinking level.
+6. The repository owns a route-to-catalog mapping. Its initial deployment
+   mapping is `dynamic/runner -> deepseek-v4.1-flash`.
+   Resolve model capabilities and limits from an explicit pi-ai catalog
+   reference; do not ask users to supply provider identifiers, model IDs,
+   protocols, context windows, or compatibility metadata.
+
+   Catalog identity and inference identity are distinct. Requests retain
+   `model: "dynamic/runner"` and use the binding's OpenAI-compatible chat
+   endpoint. Dynamic routes always use the OpenAI chat-completions request
+   shape; the metadata source must not redirect requests to its hosting
+   provider or change that protocol.
+
+   Normal configuration selects an application-configured route, with the
+   initial route selected by default. Supported thinking choices come from
+   pi-ai helpers. Application output policy supplies a default bounded by
+   the resolved model's limits. Freeze the route, resolved model metadata,
+   and effective options in each execution request.
 7. Retry stays owned by `RunDriver`. pi-ai and its SDKs run with `maxRetries: 0`;
    the driver decides retries from `stopReason` and pi-ai's classification
    helpers (`isRetryableAssistantError`, `retryDelayMs`) and records them as
@@ -164,3 +182,11 @@ Known risks and boundaries:
 
 The artifact lifecycle work recorded in `docs/TODO.md` is unrelated to this
 decision and stays out of scope.
+
+Planning refinement: the deployment uses a configured dynamic route, not a
+user-entered concrete provider model. The user specified
+`dynamic/runner -> deepseek-v4.1-flash`. A repository-owned mapping plus
+pi-ai catalog lookup replaces the initial blanket catalog exclusion and
+avoids requiring users to supply model metadata. Existing bundle probes
+did not measure these catalog imports; their actual contribution remains
+part of implementation verification.
