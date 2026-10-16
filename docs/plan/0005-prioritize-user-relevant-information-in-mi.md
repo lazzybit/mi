@@ -1,7 +1,7 @@
 # Plan-0005: Prioritize user-relevant information in mi
 
 - Created Date: 2026-10-16
-- Status: Draft
+- Status: Approved
 
 ## Target
 
@@ -28,10 +28,6 @@
 
 The starting implementation is the baseline recorded in ADR-0005. The claim
 commit and subsequent ADR documentation have not changed application code.
-
-ADR-0005 is currently recorded as Proposed. This Draft PLAN describes the
-requested implementation approach; it does not change the ADR's status or
-claim implementation approval.
 
 `src/client/view.ts` projects each raw entry into at most one `DisplayEntry`.
 For assistant messages, `assistantText()` concatenates `text` and `thinking`
@@ -394,8 +390,8 @@ supported Node and browser execution environment.
 7. Inspect the diff for exact labels, client-only scope, preserved model data,
    and ADR-0005 comments.
 
-No runtime checks have been run for this planning output. Record actual
-verification results during implementation.
+No runtime checks have been run. Record actual verification results during
+implementation.
 
 Worker-specific tests are not added by this plan because Worker behavior,
 storage, and transport remain unchanged. Any implementation discovery that
@@ -447,7 +443,7 @@ production execution machinery.
 
 ## Open Questions
 
-None blocking preparation of this Draft PLAN.
+None.
 
 The display choices are settled: `Thinking ...`, one tool row per invocation,
 the exact `．` separator, existing recorded tool durations, and no collapsed
@@ -455,4 +451,3 @@ tool previews or error indicators.
 
 This plan selects whole-second rounding, name-only fallback for missing
 duration, and initially collapsed disclosures as implementation defaults.
-The request for this plan does not itself approve implementation.

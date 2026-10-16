@@ -1,7 +1,7 @@
 # ADR-0005: Prioritize user-relevant information in mi
 
 - Created Date: 2026-10-16
-- Status: Proposed
+- Status: Accepted
 - Baseline: cb559334af4e3d89aa74f192067d270e51e054b7
 
 ## Status Quo
