@@ -1,11 +1,14 @@
 import { For, Show, createEffect, createSignal } from "solid-js";
 import type { JSX } from "@solidjs/web";
-import type { DisplayEntry } from "../view";
+import type { DisclosureController } from "../DisclosureState";
+import type { AssistantTextRow, DisplayRow, SummaryRow, ThinkingRow, ToolRow, UserRow } from "../view";
 import { AssistantMessage } from "./AssistantMessage";
+import { ThinkingBlock } from "./ThinkingBlock";
 import { ToolCallCard } from "./ToolCallCard";
 
 export function Transcript(props: {
-  entries: DisplayEntry[];
+  rows: DisplayRow[];
+  disclosure: DisclosureController;
   onLoadOlder: () => void;
   hasOlder: boolean;
 }): JSX.Element {
@@ -13,7 +16,7 @@ export function Transcript(props: {
   const [following, setFollowing] = createSignal(true);
 
   createEffect(
-    () => props.entries.length,
+    () => props.rows.length,
     () => {
       // Auto-follow only when already near the end so reading history is not
       // interrupted.
@@ -36,17 +39,20 @@ export function Transcript(props: {
           Load older messages
         </button>
       </Show>
-      <For each={props.entries}>
-        {(entry) => (
-          <article class={`entry entry-${entry.kind}`}>
-            <Show when={entry.kind === "user"}>
-              <div class="user-message">{entry.text}</div>
+      <For each={props.rows} keyed={(row) => row.key}>
+        {(row) => (
+          <article class={`entry entry-${row().kind}`}>
+            <Show when={row().kind === "user"}>
+              <div class="user-message">{(row() as UserRow).text}</div>
             </Show>
-            <Show when={entry.kind === "assistant" || entry.kind === "summary"}>
-              <AssistantMessage entry={entry} />
+            <Show when={row().kind === "assistant" || row().kind === "summary"}>
+              <AssistantMessage row={row() as AssistantTextRow | SummaryRow} />
             </Show>
-            <Show when={entry.kind === "tool_result"}>
-              <ToolCallCard entry={entry} />
+            <Show when={row().kind === "thinking"}>
+              <ThinkingBlock row={row() as ThinkingRow} disclosure={props.disclosure} />
+            </Show>
+            <Show when={row().kind === "tool"}>
+              <ToolCallCard row={row() as ToolRow} disclosure={props.disclosure} />
             </Show>
           </article>
         )}
