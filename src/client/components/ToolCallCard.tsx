@@ -1,23 +1,33 @@
-import { Show, createSignal } from "solid-js";
+// Tool invocation disclosure (ADR-0005).
+//
+// One row per invocation, in call order. Closed rows show the tool name and an
+// available recorded duration only; expanded rows reveal the available call
+// arguments and result content. Errors carry no collapsed badge or styling.
+
+import { Show } from "solid-js";
 import type { JSX } from "@solidjs/web";
-import type { DisplayEntry } from "../view";
+import type { DisclosureController } from "../DisclosureState";
+import { formatToolLabel, type ToolRow } from "../view";
+import { TranscriptDisclosure } from "./TranscriptDisclosure";
 
-export function ToolCallCard(props: { entry: DisplayEntry }): JSX.Element {
-  const [expanded, setExpanded] = createSignal(false);
-  const preview = () => {
-    const text = props.entry.text;
-    return text.length > 200 ? `${text.slice(0, 200)}…` : text;
-  };
-
+export function ToolCallCard(props: { row: ToolRow; disclosure: DisclosureController }): JSX.Element {
+  const label = () => formatToolLabel(props.row);
   return (
-    <div class={`tool-card ${props.entry.isError ? "error" : ""}`}>
-      <button class="tool-summary touch" onClick={() => setExpanded((value) => !value)}>
-        <span class="tool-name">{props.entry.toolName ?? "tool"}</span>
-        <span class="tool-state">{props.entry.isError ? "error" : "result"}</span>
-      </button>
-      <Show when={!expanded()} fallback={<pre class="tool-full">{props.entry.text}</pre>}>
-        <pre class="tool-preview">{preview()}</pre>
+    <TranscriptDisclosure
+      label={label()}
+      expanded={props.disclosure.expanded(props.row.key)}
+      onToggle={(open) => props.disclosure.set(props.row.key, open)}
+      class="tool-card"
+    >
+      <Show when={props.row.arguments !== undefined}>
+        <pre class="tool-arguments">{JSON.stringify(props.row.arguments, null, 2)}</pre>
       </Show>
-    </div>
+      <Show when={props.row.result !== undefined}>
+        <pre class={`tool-result ${props.row.result?.isError ? "error" : ""}`}>{props.row.result?.text}</pre>
+      </Show>
+      <Show when={props.row.arguments === undefined && props.row.result === undefined}>
+        <p class="notice">No details available.</p>
+      </Show>
+    </TranscriptDisclosure>
   );
 }

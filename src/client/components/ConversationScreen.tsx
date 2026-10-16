@@ -1,8 +1,16 @@
-import { Show, createEffect, createSignal } from "solid-js";
+import { Show, createEffect, createMemo, createSignal } from "solid-js";
 import type { JSX } from "@solidjs/web";
 import type { ConversationView, Cursor, EntryId, EntryRecord } from "@earendil-works/pi-durable";
 import type { ConnectionStatus } from "../session/SessionFeed";
-import { liveSummary, queuedInputs, toDisplayEntries, transcriptEntries, type DisplayEntry } from "../view";
+import { DisclosureState } from "../DisclosureState";
+import {
+  livePartialMessage,
+  liveSummary,
+  projectLiveRows,
+  projectTranscript,
+  queuedInputs,
+  type DisplayRow,
+} from "../view";
 import { Composer } from "./Composer";
 import { QueuePanel } from "./QueuePanel";
 import { RunStatusBar } from "./RunStatusBar";
@@ -23,7 +31,10 @@ export function ConversationScreen(props: {
     limit: number,
   ) => Promise<{ entries: EntryRecord[]; next?: Cursor }>;
 }): JSX.Element {
-  const [older, setOlder] = createSignal<DisplayEntry[]>([]);
+  // ADR-0005: presentation state is scoped to the managed conversation and
+  // survives projection, streaming, and history reconciliation.
+  const disclosure = new DisclosureState();
+  const [older, setOlder] = createSignal<EntryRecord[]>([]);
   const [cursor, setCursor] = createSignal<Cursor>();
   const [exhausted, setExhausted] = createSignal(false);
   const [historyBefore, setHistoryBefore] = createSignal<EntryId>();
@@ -46,7 +57,37 @@ export function ConversationScreen(props: {
     },
   );
 
-  const entries = () => [...older(), ...transcriptEntries(props.view)];
+  // ADR-0005: keep loaded history as raw entries so projection can pair a call
+  // and its result across a page boundary. Deduplicate by raw entry identity
+  // while preserving upstream ordering.
+  const combinedEntries = createMemo<EntryRecord[]>(() => {
+    const seen = new Set<string>();
+    const combined: EntryRecord[] = [];
+    for (const entry of [...older(), ...(props.view?.entries ?? [])]) {
+      const key = String(entry.id);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      combined.push(entry);
+    }
+    return combined;
+  });
+  const committedRows = createMemo<DisplayRow[]>(() => projectTranscript(combinedEntries()));
+  const liveMessage = createMemo(() => livePartialMessage(props.view));
+  const rows = createMemo<DisplayRow[]>(() => {
+    const message = liveMessage();
+    const base = committedRows();
+    return message ? [...base, ...projectLiveRows(message)] : base;
+  });
+  createEffect(
+    () => ({
+      conversationId: props.conversationId,
+      entries: combinedEntries(),
+      rows: committedRows(),
+      liveMessage: liveMessage(),
+    }),
+    (observation) => disclosure.observe(observation),
+  );
+
   const hasOlder = () => !exhausted() && (historyBefore() ?? props.view?.entries[0]?.id) !== undefined;
 
   const loadOlder = async () => {
@@ -65,12 +106,11 @@ export function ConversationScreen(props: {
       if (token !== activeLoad || generation !== selectionGeneration()) return;
       // `maxEntryId` is inclusive, so deduplicate against loaded history and
       // the active view.
-      const known = new Set<DisplayEntry["id"]>(older().map((entry) => entry.id));
-      for (const entry of props.view?.entries ?? []) known.add(entry.id);
-      const display = toDisplayEntries([...page.entries].reverse()).filter(
-        (entry) => !known.has(entry.id),
-      );
-      setOlder((previous) => [...display, ...previous]);
+      const known = new Set<string>();
+      for (const entry of older()) known.add(String(entry.id));
+      for (const entry of props.view?.entries ?? []) known.add(String(entry.id));
+      const pageEntries = [...page.entries].reverse().filter((entry) => !known.has(String(entry.id)));
+      setOlder((previous) => [...pageEntries, ...previous]);
       setCursor(page.next);
       if (!page.next) setExhausted(true);
     } catch {
@@ -97,7 +137,8 @@ export function ConversationScreen(props: {
               onCancel={() => void props.actions.cancel()}
             />
             <Transcript
-              entries={entries()}
+              rows={rows()}
+              disclosure={disclosure}
               hasOlder={hasOlder()}
               onLoadOlder={() => void loadOlder()}
             />
